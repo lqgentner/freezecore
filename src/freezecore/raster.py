@@ -1,0 +1,599 @@
+"""Rasterio helpers with transparent S3 support.
+
+This module provides utilities for opening, profiling, grouping, merging,
+and rewriting GeoTIFF files on local disk or S3-compatible object storage.
+"""
+
+from __future__ import annotations
+
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, overload
+
+from pyproj import CRS
+from pyproj.exceptions import CRSError
+import rasterio
+import rasterio.env
+from rasterio.merge import merge
+import rasterio.session
+import rasterio.shutil
+from upath import UPath
+
+from freezecore.download import TRANSIENT_HTTP_STATUS_CODES
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
+    from rasterio.enums import ColorInterp
+    from rasterio.io import DatasetReader, DatasetWriter
+
+logger = logging.getLogger(__name__)
+
+RASTERIO_PROFILE_DEFAULTS = {
+    "driver": "GTiff",
+    "tiled": True,
+    "blockxsize": 512,
+    "blockysize": 512,
+    "interleave": "pixel",
+    "compress": "deflate",
+}
+"""Suitable defaults for a Cloud-optimized GeoTIFF (COG)."""
+
+type AnyPath = str | Path | UPath
+
+# Shared transient codes, plus 403 (S3 can return this transiently)
+GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_HTTP_STATUS_CODES}))
+GDAL_HTTP_MAX_RETRY = 5
+GDAL_HTTP_RETRY_DELAY_S = 1
+
+
+@contextmanager
+def _s3_env(path: UPath) -> Iterator[None]:
+    """Set up GDAL and rasterio environments for S3-compatible object storage.
+
+    Extracts credentials and endpoint configuration from the fsspec storage
+    options attached to ``path`` and applies them to rasterio (bundled GDAL)
+    for the duration of the ``with`` block. When the optional ``osgeo``
+    bindings are installed, the same configuration is mirrored into the
+    system GDAL so that raw ``gdal.*`` I/O paths see it too; rasterio-only
+    consumers work without ``osgeo``.
+
+    Parameters
+    ----------
+    path : UPath
+        A UPath with ``protocol="s3"`` whose ``storage_options`` carry
+        fsspec/s3fs credentials (``key``, ``secret``, ``token``) and
+        optionally a custom ``endpoint_url``.
+    """
+    import boto3  # noqa: PLC0415
+
+    try:
+        from osgeo import gdal  # noqa: PLC0415
+    except ImportError:
+        gdal = None
+
+    storage_options = path.storage_options
+    boto3_session = boto3.Session(
+        aws_access_key_id=storage_options.get("key"),
+        aws_secret_access_key=storage_options.get("secret"),
+        aws_session_token=storage_options.get("token"),
+        region_name=storage_options.get("region_name"),
+    )
+    credentials = boto3_session.get_credentials().get_frozen_credentials()
+
+    non_aws_options: dict[str, str] = {
+        # /vsis3/ has no native random-write support.
+        "CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE": "YES",
+        # Retry transient HTTP failures on the /vsis3 read/write path
+        "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
+        "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
+        "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
+        # Don't probe for sidecar files on open
+        "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
+    }
+    aws_options: dict[str, str] = {
+        "AWS_ACCESS_KEY_ID": credentials.access_key,
+        "AWS_SECRET_ACCESS_KEY": credentials.secret_key,
+    }
+    if credentials.token:
+        aws_options["AWS_SESSION_TOKEN"] = credentials.token
+    if region := boto3_session.region_name:
+        aws_options["AWS_REGION"] = region
+    if endpoint_url := storage_options.get("endpoint_url"):
+        host = endpoint_url.removeprefix("https://").removeprefix("http://")
+        non_aws_options["AWS_S3_ENDPOINT"] = host
+        non_aws_options["AWS_VIRTUAL_HOSTING"] = "FALSE"
+        if endpoint_url.startswith("http://"):
+            non_aws_options["AWS_HTTPS"] = "NO"
+
+    rio_env = rasterio.env.Env(
+        session=rasterio.session.AWSSession(boto3_session),
+        **non_aws_options,
+    )
+    gdal_env = (
+        gdal.config_options({**non_aws_options, **aws_options})
+        if gdal is not None
+        else nullcontext()
+    )
+    with rio_env, gdal_env:
+        yield
+
+
+@contextmanager
+def _env_for_path(path: AnyPath) -> Iterator[None]:
+    """Enter the appropriate GDAL/rasterio environment for a path's storage backend.
+
+    Local paths get a plain ``Env``; S3 ``UPath`` instances get a credentialed
+    env via :func:`_s3_env`.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` uses a protocol other than local (``""``) or ``"s3"``.
+    """
+    path = UPath(path)
+    match path.protocol:
+        case "":
+            with rasterio.env.Env():
+                yield
+        case "s3":
+            with _s3_env(path):
+                yield
+        case p:
+            msg = f"Unsupported protocol '{p}'."
+            raise ValueError(msg)
+
+
+def _to_gdal_uri(path: AnyPath) -> str:
+    """Convert a path to a GDAL-readable URI, using ``/vsis3/`` for S3.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` uses a protocol other than local (``""``) or ``"s3"``.
+    """
+    path = UPath(path)
+    match path.protocol:
+        case "":
+            return str(path)
+        case "s3":
+            return f"/vsis3/{path.path}"
+        case p:
+            msg = f"Unsupported protocol '{p}'."
+            raise ValueError(msg)
+
+
+@contextmanager
+def _rasterio_open(
+    path: AnyPath,
+    mode: Literal["r", "r+", "w", "w+"] = "r",
+    **kwargs,
+) -> Iterator[DatasetReader | DatasetWriter]:
+    """Yield a rasterio dataset, configuring a GDAL env for S3 if needed.
+
+    Internal generator backing the public :func:`rasterio_open` dispatcher.
+    """
+    path = UPath(path)
+    with _env_for_path(path), rasterio.open(str(path), mode, **kwargs) as dataset:
+        yield dataset
+
+
+@overload
+def rasterio_open(
+    path: AnyPath,
+    mode: Literal["r"] = ...,
+    **kwargs,
+) -> AbstractContextManager[DatasetReader]: ...
+@overload
+def rasterio_open(
+    path: AnyPath,
+    mode: Literal["r+", "w", "w+"],
+    **kwargs,
+) -> AbstractContextManager[DatasetWriter]: ...
+def rasterio_open(
+    path: AnyPath,
+    mode: Literal["r", "r+", "w", "w+"] = "r",
+    **kwargs,
+) -> AbstractContextManager[DatasetReader | DatasetWriter]:
+    """Open a rasterio dataset from a local path or an S3-backed UPath.
+
+    A drop-in replacement for ``rasterio.open`` that automatically injects
+    GDAL environment variables derived from a UPath's fsspec storage options,
+    enabling reads and writes against S3-compatible object stores without
+    manually managing credentials.
+
+    Parameters
+    ----------
+    path : str | Path | UPath
+        Path to the raster file. A ``UPath`` with protocol ``s3`` triggers
+        credential extraction from its underlying fsspec filesystem. A plain
+        ``Path`` or ``str`` is treated as a local file.
+    mode : {"r", "r+", "w", "w+"}, optional
+        File mode passed directly to ``rasterio.open``. Defaults to ``"r"``.
+    **kwargs : Any
+        Additional keyword arguments forwarded to ``rasterio.open``, such as
+        ``driver``, ``width``, ``height``, ``count``, ``dtype``, or ``crs``.
+
+    Returns
+    -------
+    AbstractContextManager[rasterio.DatasetReader]
+        When ``mode="r"``.
+    AbstractContextManager[rasterio.DatasetWriter]
+        When ``mode`` is ``"r+"``, ``"w"``, or ``"w+"``.
+
+    Raises
+    ------
+    ValueError
+        If ``path`` uses a protocol other than local (``""``) or ``"s3"``.
+    """
+    return _rasterio_open(path, mode, **kwargs)
+
+
+def build_rasterio_profile(*profiles: dict[str, Any] | None) -> dict[str, Any]:
+    """Build a rasterio profile by merging the provided profiles, starting from defaults.
+
+    Each argument is applied in order, so later profiles override earlier ones.
+
+    The built-in defaults are::
+
+        driver     = "GTiff"
+        tiled      = True
+        blockxsize = 512
+        blockysize = 512
+        interleave = "pixel"
+        compress   = "deflate"
+
+    The caller must supply ``dtype``, ``nodata``, ``count``,
+    ``width``, and ``height`` before passing the profile to ``rasterio.open``.
+
+    Parameters
+    ----------
+    *profiles : dict[str, Any] or None
+        Profile dicts to merge, in order of increasing precedence.
+
+    Returns
+    -------
+    dict[str, Any]
+        Merged profile starting from the defaults above.
+    """
+    dst_profile = RASTERIO_PROFILE_DEFAULTS.copy()
+    for profile in profiles:
+        if profile is not None:
+            dst_profile.update(profile)
+    return dst_profile
+
+
+def _inject_band_metadata(
+    dst_file: AnyPath,
+    *,
+    band_names: list[str] | None = None,
+    color_interp: list[ColorInterp] | None = None,
+) -> None:
+    """Inject band descriptions and color interpretation into a raster file.
+
+    Supports both VRT files (used as COG source) and GeoTIFF COGs. For COGs,
+    GDAL requires the IGNORE_COG_LAYOUT_BREAK open option to allow in-place
+    updates without losing the COG layout.
+
+    Parameters
+    ----------
+    dst_file : str | Path | UPath
+        Target file to update (VRT or GeoTIFF).
+    band_names : list[str] | None
+        Band descriptions to set, one per band.
+    color_interp : list[ColorInterp] | None
+        Color interpretation per band.
+    """
+    if band_names is None and color_interp is None:
+        return
+    with rasterio_open(dst_file, "r+") as ds:
+        if band_names is not None:
+            for i, name in enumerate(band_names, 1):
+                ds.set_band_description(i, name)
+        if color_interp is not None:
+            ds.colorinterp = color_interp
+
+
+def get_utm_zone_string(projparams: Any) -> str:
+    """Extract zero-padded UTM zone identifier.
+
+    Parameters
+    ----------
+    projparams : Any
+        An object that can initialize a pyproj.CRS class instance,
+        e.g., a EPSG code or any object that implements `to_wkt()`.
+
+    Returns
+    -------
+    str
+        UTM zone identifier (e.g., '32N', '01S')
+
+    Raises
+    ------
+    ValueError
+        If UTM zone cannot be extracted.
+    """
+    try:
+        crs = CRS(projparams)
+    except CRSError as err:
+        msg = f"Invalid `projparams` {crs}, could not initialize `pyproj.CRS`."
+        raise ValueError(msg) from err
+
+    utm_zone = crs.utm_zone
+    if utm_zone is None:
+        msg = f"Could not extract CRS identifier from: {crs.name}"
+        raise ValueError(msg)
+    zone_number = utm_zone[:-1]
+    hemisphere_letter = utm_zone[-1]
+
+    return f"{int(zone_number):02d}{hemisphere_letter}"
+
+
+def get_epsg_string(projparams: Any) -> str:
+    """Extract CRS identifier string from CRS object.
+
+    Parameters
+    ----------
+    projparams : Any
+        An object that can initialize a pyproj.CRS class instance,
+        e.g., a EPSG code or any object that implements `to_wkt()`.
+
+    Returns
+    -------
+    str
+        'EPSG:' + EPSG code identifier (e.g., 'EPSG:4326')
+
+    Raises
+    ------
+    ValueError
+        If EPSG code cannot be extracted.
+    """
+    try:
+        crs = CRS(projparams)
+    except CRSError as err:
+        msg = f"Invalid `projparams` {crs}, could not initialize `pyproj.CRS`."
+        raise ValueError(msg) from err
+
+    epsg_code = crs.to_epsg()
+    if epsg_code is None:
+        msg = f"Could not extract EPSG code from: {crs.name}"
+        raise ValueError(msg)
+
+    return f"EPSG:{epsg_code}"
+
+
+def utm_zone_to_crs(utm_zone: str) -> CRS:
+    """Create a CRS from an UTM zone string.
+
+    Parameters
+    ----------
+    utm_zone: str
+        UTM zone identifier (e.g., '32N', '01S')
+
+    Returns
+    -------
+    pyproj.CRS
+        The coordinate reference system.
+    """
+    zone_number = int(utm_zone[:-1])
+    hemisphere = utm_zone[-1]
+    # Create UTM CRS: northern hemisphere uses EPSG:326xx, southern uses EPSG:327xx
+    epsg_code = 32600 + zone_number if hemisphere == "N" else 32700 + zone_number
+    return CRS.from_epsg(epsg_code)
+
+
+def group_tiffs_by_crs(src_tiffs: Sequence[AnyPath]) -> dict[str, list[UPath]]:
+    """Group GeoTIFF files by their coordinate reference system.
+
+    Parameters
+    ----------
+    src_tiffs : Sequence[str | Path | UPath]
+        Sequence of paths to GeoTIFF files to group.
+
+    Returns
+    -------
+    dict[str, list[UPath]]
+        Dictionary mapping CRS identifiers to lists of ``UPath`` instances.
+        UTM zones use format 'UTM<XX>[N|S]' (e.g., 'UTM32N', 'UTM01S').
+        Non-UTM projections use format 'EPSG<XXXX>' (e.g., 'EPSG4326').
+
+    Raises
+    ------
+    ValueError
+        If src_tiffs is empty.
+    TypeError
+        If CRS cannot be read from any file.
+    FileNotFoundError
+        If any source file does not exist.
+    """
+    if not src_tiffs:
+        msg = "src_tiffs list cannot be empty"
+        raise ValueError(msg)
+
+    groups: dict[str, list[UPath]] = {}
+
+    for src_tiff in src_tiffs:
+        src_path = UPath(src_tiff)
+
+        # Validate file exists
+        if not src_path.exists():
+            msg = f"Source file not found: {src_path}"
+            raise FileNotFoundError(msg)
+
+        # Read CRS
+        with rasterio_open(src_path) as src:
+            if src.crs is None:
+                msg = f"File has no CRS: {src_path}"
+                raise TypeError(msg)
+
+            crs = CRS.from_user_input(src.crs)
+            try:
+                utm_str = get_utm_zone_string(crs)
+                crs_str = "UTM" + utm_str
+            except ValueError:
+                epsg_str = get_epsg_string(crs)
+                crs_str = epsg_str.replace(":", "")
+
+        # Add to group
+        if crs_str not in groups:
+            groups[crs_str] = []
+        groups[crs_str].append(src_path)
+
+        logger.debug("Grouped %s into CRS group '%s'", src_path.name, crs_str)
+
+    logger.info("Grouped %d files into %d CRS groups", len(src_tiffs), len(groups))
+    return groups
+
+
+def merge_tiffs(
+    src_files: Sequence[AnyPath],
+    dst_file: AnyPath,
+    *,
+    method: str = "first",
+    mem_limit_mb: int = 10_000,
+    profile: dict[str, Any] | None = None,
+) -> None:
+    """Merge multiple GeoTIFF files into a single file.
+
+    Uses rasterio.merge.merge() to combine overlapping rasters.
+    Band names are copied from the first source file.
+
+    Parameters
+    ----------
+    src_files : Sequence[str | Path | UPath]
+        Sequence of source GeoTIFF files to merge. Must all have same CRS.
+    dst_file : str | Path | UPath
+        Path to output merged GeoTIFF.
+    method : str, default "first"
+        Method for handling overlapping pixels. Options:
+        - "first": Use value from first raster in list
+        - "last": Use value from last raster in list
+        - "min": Use minimum value
+        - "max": Use maximum value
+    mem_limit_mb : int, default 10000
+        Memory limit in megabytes for merge operation. Controls how much
+        data is read into memory at once. Default is 10GB.
+    profile : dict[str, Any] or None, optional
+        Custom rasterio profile settings. If None, uses deflate compression
+        with 512x512 tiling.
+
+    Raises
+    ------
+    ValueError
+        If src_files is empty.
+        If files have different CRS (when validate_crs=True).
+    FileNotFoundError
+        If any source file does not exist.
+    RuntimeError
+        If merge operation fails.
+    """
+    if not src_files:
+        msg = "src_files list cannot be empty"
+        raise ValueError(msg)
+
+    dst_file = UPath(dst_file)
+    src_paths = [UPath(f) for f in src_files]
+
+    # Validate source files exist
+    for src_path in src_paths:
+        if not src_path.exists():
+            msg = f"Source file not found: {src_path}"
+            raise FileNotFoundError(msg)
+
+    logger.info("Merging %d GeoTIFFs into '%s'", len(src_files), dst_file.name)
+
+    # Extract band names and profile from first file
+    with rasterio_open(src_paths[0]) as src:
+        src_profile: dict[str, Any] = src.profile
+        band_names: list[str] = src.descriptions
+
+    dst_profile = build_rasterio_profile(src_profile, profile)
+
+    # Merge files
+    merge(
+        src_files,
+        method=method,
+        mem_limit=mem_limit_mb,
+        dst_path=dst_file,
+        dst_kwds=dst_profile,
+    )
+
+    _inject_band_metadata(dst_file, band_names=band_names)
+
+    logger.info("Successfully merged into '%s'", dst_file.name)
+
+
+def rewrite_tiff(
+    src_file: AnyPath,
+    dst_file: AnyPath,
+    profile: dict[str, Any] | None = None,
+    band_names: list[str] | None = None,
+    color_interp: list[ColorInterp] | None = None,
+) -> None:
+    """Rewrite a GeoTIFF, optionally to a different storage backend.
+
+    Useful for applying compression/tiling, renaming bands, or moving files
+    between local disk and S3. Source-side band descriptions, color
+    interpretation, NODATA, and tags are preserved automatically. The source
+    file is deleted on success when ``src_file != dst_file``.
+
+    Parameters
+    ----------
+    src_file : str | Path | UPath
+        Source GeoTIFF (local or S3).
+    dst_file : str | Path | UPath
+        Destination GeoTIFF (local or S3). May be the same as ``src_file``,
+        in which case the file is rewritten in place via a sibling temp file.
+    profile : dict[str, Any] or None, optional
+        Custom rasterio profile settings. If None, uses deflate compression
+        with 512x512 tiling.
+    band_names : list[str] or None, optional
+        New band descriptions, one per band. If None, the source's existing
+        band descriptions are preserved.
+    color_interp : list[ColorInterp] or None, optional
+        New per-band color interpretation. If None, the source's existing
+        color interpretation is preserved.
+
+    Raises
+    ------
+    RuntimeError
+        If the rewrite fails.
+    """
+    src_file = UPath(src_file)
+    dst_file = UPath(dst_file)
+
+    # GDAL CreateCopy can't read and write the same file, so route in-place
+    # rewrites through a sibling temp file and rename on success.
+    in_place = src_file == dst_file
+    work_dst = dst_file.with_name(f".{dst_file.name}.tmp") if in_place else dst_file
+
+    dst_profile = build_rasterio_profile(profile)
+    driver = dst_profile.pop("driver", "GTiff")
+    # Strip rasterio open()-only keys that are not GTiff creation options.
+    # Otherwise, GDAL warns on unrecognised ones.
+    for _k in ("dtype", "nodata", "crs", "transform", "count", "width", "height"):
+        dst_profile.pop(_k, None)
+
+    # Prefer an S3 path (source or dst) so AWS credentials are installed.
+    env_path: AnyPath = src_file if src_file.protocol == "s3" else dst_file
+
+    try:
+        with _env_for_path(env_path):
+            rasterio.shutil.copy(
+                _to_gdal_uri(src_file),
+                _to_gdal_uri(work_dst),
+                driver=driver,
+                **dst_profile,
+            )
+        _inject_band_metadata(work_dst, band_names=band_names, color_interp=color_interp)
+        if in_place:
+            work_dst.rename(dst_file)
+        elif src_file != dst_file:
+            src_file.unlink()
+    except Exception as e:
+        work_dst.unlink(missing_ok=True)
+        msg = f"Failed to rewrite GeoTIFF: {e}"
+        raise RuntimeError(msg) from e
+
+    logger.debug("Rewrote GeoTIFF from '%s' to '%s'", src_file.name, dst_file.name)

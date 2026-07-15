@@ -1,0 +1,163 @@
+[project]
+name = "freezecore"
+description = "Shared geospatial core utilities: MGRS grid, raster/S3 helpers, HTTP download tooling."
+authors = [
+  { name = "Luis Gentner" , email = "luis.gentner@geo.uzh.ch"},
+]
+readme = "README.md"
+license.file = "LICENSE"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+]
+dynamic = ["version"]
+dependencies = [
+    "affine",
+    "geopandas>=1.1",
+    "mgrs>=1.4",
+    "numpy>=1.24",
+    "odc-geo>=0.5.0",
+    "pandas>=2.3",
+    "platformdirs",
+    "pyarrow",
+    "pyproj>=3.5",
+    "rasterio>=1.5.0",
+    "requests",
+    "rich>=13",
+    "shapely>=2",
+    "tenacity",
+    "universal-pathlib>=0.3",
+]
+
+[project.optional-dependencies]
+s3 = [
+    "s3fs>=2026",
+    "fsspec>=2026",
+    "boto3",
+]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pandas-stubs",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "types-geopandas",
+    "types-requests",
+]
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+[tool.ruff]
+line-length = 99
+src = ["src"]
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+# Source: https://github.com/CoreyMSchafer/dotfiles/blob/master/settings/ruff.toml
+extend-select = [
+    "E",    # Pycodestyle errors (style issues)
+    "W",    # Pycodestyle warnings (style issues)
+    "C90",  # McCabe – complexity metric for functions
+    "I",    # isort – import ordering checks
+    "N",    # PEP8 Naming – naming conventions
+    "D",    # Pydocstyle – docstring formatting
+    "UP",   # Pyupgrade – upgrades syntax to newer Python versions
+    "YTT",  # Flake8-2020 – checks for Python 2020 best practices
+    "ANN",  # Flake8-annotations – enforces type annotation style
+    "ASYNC",# Flake8-async – checks async/await usage
+    "S",    # Flake8-bandit – security issues
+    "BLE",  # Flake8-blind-except – flags bare excepts
+    "FBT",  # Flake8-boolean-trap – potential pitfalls with booleans
+    "B",    # Flake8-bugbear – common bug patterns
+    "A",    # Flake8-builtins – misuse of Python built-in names
+    "COM",  # Flake8-commas – trailing/comma issues
+    "C4",   # Flake8-comprehensions – best practices in comprehensions
+    "DTZ",  # Flake8-datetimez – requires timezone-aware datetime objects
+    "T10",  # Flake8-debugger – debugger statements (e.g. pdb)
+    "DJ",   # Flake8-django – Django-specific conventions
+    "EM",   # Flake8-errmsg – error message style
+    "EXE",  # Flake8-executable – executable file checks
+    "FA",   # Flake8-future-annotations – future import for annotations
+    "ISC",  # Flake8-implicit-str-concat – warns on implicit string concatenation
+    "ICN",  # Flake8-import-conventions – enforces conventional import aliases
+    "LOG",  # Flake8-logging – proper logging usage
+    "G",    # Flake8-logging-format – logging format string issues
+    "INP",  # Flake8-no-pep420 – warns against non-PEP420 namespace usage
+    "PIE",  # Flake8-pie – Python improvement suggestions
+    # "T20",  # Flake8-print – disallows print statements
+    "PYI",  # Flake8-pyi – checks for type stub (.pyi) consistency
+    "PT",   # Flake8-pytest-style – pytest best practices
+    "Q",    # Flake8-quotes – enforces quote style consistency
+    "RSE",  # Flake8-raise – proper raise statement usage
+    "RET",  # Flake8-return – return statement issues
+    "SLF",  # Flake8-self – flags instance methods that don't use self
+    "SLOT", # Flake8-slots – suggests use of __slots__ where appropriate
+    "SIM",  # Flake8-simplify – code simplification hints
+    "TID",  # Flake8-tidy-imports – enforces specific import styles (e.g., no relative imports)
+    "TC",   # Flake8-type-checking – proper import of typing in type checks
+    "INT",  # Flake8-gettext – checks for proper internationalization usage
+    "ARG",  # Flake8-unused-arguments – flags unused function arguments
+    "PTH",  # Flake8-use-pathlib – encourages pathlib over os.path
+    "TD",   # Flake8-todos – flags TODO comments
+    "FIX",  # Flake8-fixme – flags FIXME comments
+    # "ERA",  # Eradicate – detects commented-out code (potentially dangerous)
+    "PD",   # Pandas-vet – checks pandas-specific code practices
+    "PGH",  # Pygrep-hooks – custom grep hooks for linting
+    "PL",   # Pylint – integration with Pylint conventions
+    "TRY",  # Tryceratops – try/except usage suggestions
+    "FLY",  # Flynt – f-string conversion suggestions
+    "NPY",  # NumPy-specific rules – ensures NumPy coding standards
+    "FAST", # FastAPI – FastAPI-specific linting rules
+    "AIR",  # Airflow – Airflow-specific linting rules
+    "PERF", # Perflint – performance-related checks
+    "FURB", # Refurb – rules for code refurbishment
+    "DOC",  # Pydoclint – docstring linting and consistency
+    "RUF",  # Ruff-specific rules – additional Ruff checks
+]
+
+ignore = [
+    "ANN003",   # flake8-annotations - Missing type annotations for **kwargs
+    "ANN401",   # Dynamically typed expressions (typing.Any) are disallowed in `value`
+    "PLR0913",  # Pylint - Too many arguments
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.flake8-annotations]
+suppress-dummy-args = false
+
+[tool.ruff.lint.extend-per-file-ignores]
+"tests/**/*.py" = [
+    "S101",     # Allow asserts in tests
+    "S105",     # Allow dummy passwords in tests
+    "S106",     # Allow dummy passwords passed as arguments in tests
+    "D101",     # Test class names are self-documenting
+    "D102",     # Test method names are self-documenting
+    "D103",     # Test function names are self-documenting
+    "FBT",      # Don't care about booleans as positional arguments in tests, e.g. via @pytest.mark.parametrize()
+    "PLR2004",  # Allow magic values in tests
+    "SLF001",   # Allow accesses on "private" class members.
+    "TC003",    # Runtime imports of stdlib types are fine in tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["freezecore"]
+force-sort-within-sections = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.mypy]
+ignore_missing_imports = true

@@ -1,0 +1,169 @@
+"""Provides vector geometry related tools."""
+
+from pathlib import Path
+
+import geopandas as gpd
+from shapely import (
+    GeometryCollection,
+    LineString,
+    MultiLineString,
+    MultiPoint,
+    MultiPolygon,
+    Point,
+    Polygon,
+)
+from shapely.geometry.base import BaseGeometry
+
+
+def save_and_read_parquet(gdf: gpd.GeoDataFrame, out_path: str | Path) -> gpd.GeoDataFrame:
+    """
+    Save a GeoDataFrame as a GeoParquet file and read it back for verification.
+
+    Parameters
+    ----------
+    gdf : gpd.GeoDataFrame
+        The GeoDataFrame to be saved.
+    out_path : str or Path
+        The file path where the GeoParquet file will be saved.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        The GeoDataFrame read back from the saved GeoParquet file.
+
+    Notes
+    -----
+    The function ensures that the output directory exists before saving.
+    It uses the 'pyarrow' engine for writing the Parquet file.
+
+    """
+    out_path = Path(out_path)
+    # Make sure the location exists
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_parquet(out_path, engine="pyarrow")
+    return gpd.read_parquet(out_path)
+
+
+def drop_z_if_zero(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Remove the Z coordinate from all geometries in a GeoDataFrame if all Z coordinates are zero.
+
+    Parameters
+    ----------
+    gdf : geopandas.GeoDataFrame
+        GeoDataFrame containing geometries with potential Z coordinates.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame with Z coordinates removed if they are all zero.
+
+    Raises
+    ------
+    ValueError
+        If the geometry does not have a Z axis.
+    TypeError
+        If the geometry type is unknown.
+
+    """
+    gdf_copy = gdf.copy()
+    if is_z_axis_zero(gdf):
+        gdf_copy.geometry = gdf_copy.force_2d()
+    return gdf_copy
+
+
+def is_z_axis_zero(gdf: gpd.GeoDataFrame) -> bool:
+    """
+    Check if the Z axis in a GeoDataFrame is always zero.
+
+    Parameters
+    ----------
+    gdf : geopandas.GeoDataFrame
+        GeoDataFrame containing geometries with potential Z coordinates.
+
+    Returns
+    -------
+    bool
+        True if all Z values are zero, False otherwise.
+
+    Raises
+    ------
+    ValueError
+        If the geometry does not have a Z axis.
+    TypeError
+        If the geometry type is unknown.
+
+    """
+    z_values = gdf.geometry.map(_extract_z_values)
+    return all(all(z == 0 for z in z_list) for z_list in z_values)
+
+
+def _extract_z_values(geom: BaseGeometry) -> list[float]:
+    """
+    Extract all Z values from a shapely geometry.
+
+    Parameters
+    ----------
+    geom : shapely.geometry.base.BaseGeometry
+        Geometry with Z coordinates.
+
+    Returns
+    -------
+    list[float]
+        List of Z values.
+
+    Raises
+    ------
+    ValueError
+        If the geometry does not have a Z axis.
+    TypeError
+        If the geometry type is unknown.
+
+    """
+    if not geom.has_z:
+        msg = "Geometry has no Z axis"
+        raise ValueError(msg)
+    match geom:
+        case Point():
+            z = [geom.z]
+        case LineString():
+            z = [coord[2] for coord in geom.coords]
+        case Polygon():
+            z = [coord[2] for coord in geom.exterior.coords]
+        case MultiPoint():
+            z = [point.z for point in geom.geoms]
+        case MultiLineString():
+            z = [coord[2] for line in geom.geoms for coord in line.coords]
+        case MultiPolygon():
+            z = [coord[2] for poly in geom.geoms for coord in poly.exterior.coords]
+        case GeometryCollection():
+            z = []
+            for sub_geom in geom.geoms:
+                z.extend(_extract_z_values(sub_geom))
+        case _:
+            msg = f"Unsupported geometry type '{type(geom).__name__}'."
+            raise TypeError(msg)
+    return z
+
+
+def simplify_multipolygons(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Convert single-polygon MultiPolygons to Polygons.
+
+    Parameters
+    ----------
+    gdf : geopandas.GeoDataFrame
+        GeoDataFrame containing geometries.
+
+    Returns
+    -------
+    geopandas.GeoDataFrame
+        GeoDataFrame with single-polygon MultiPolygons converted to Polygons.
+
+    """
+    gdf_copy = gdf.copy()
+    gdf_copy.geometry = [
+        geom.geoms[0] if isinstance(geom, MultiPolygon) and len(geom.geoms) == 1 else geom
+        for geom in gdf_copy.geometry
+    ]
+    return gdf_copy
