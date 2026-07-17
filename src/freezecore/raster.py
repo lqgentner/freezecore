@@ -15,6 +15,7 @@ from pyproj import CRS
 from pyproj.exceptions import CRSError
 import rasterio
 import rasterio.env
+from rasterio.io import MemoryFile
 from rasterio.merge import merge
 import rasterio.session
 import rasterio.shutil
@@ -25,6 +26,7 @@ from freezecore.download import TRANSIENT_HTTP_STATUS_CODES
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+    import numpy as np
     from rasterio.enums import ColorInterp
     from rasterio.io import DatasetReader, DatasetWriter
 
@@ -41,6 +43,15 @@ RASTERIO_PROFILE_DEFAULTS = {
 """Suitable defaults for a Cloud-optimized GeoTIFF (COG)."""
 
 type AnyPath = str | Path | UPath
+
+COG_PROFILE: dict[str, Any] = {
+    "driver": "COG",
+    "compress": "deflate",
+    "blocksize": 512,
+    "overviews": "IGNORE_EXISTING",
+}
+"""Creation profile for the GDAL ``COG`` driver, used by :func:`write_cog` and by
+callers rewriting existing files to COG via :func:`rewrite_tiff`."""
 
 # Shared transient codes, plus 403 (S3 can return this transiently)
 GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_HTTP_STATUS_CODES}))
@@ -574,6 +585,13 @@ def rewrite_tiff(
     # Otherwise, GDAL warns on unrecognised ones.
     for _k in ("dtype", "nodata", "crs", "transform", "count", "width", "height"):
         dst_profile.pop(_k, None)
+    if driver != "GTiff":
+        # RASTERIO_PROFILE_DEFAULTS carries GTiff-specific creation options
+        # (e.g. blockxsize/blockysize instead of the COG driver's BLOCKSIZE)
+        # that other drivers don't recognise; drop them so callers can target
+        # e.g. driver="COG" via `profile` without GDAL warning on every key.
+        for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
+            dst_profile.pop(_k, None)
 
     # Prefer an S3 path (source or dst) so AWS credentials are installed.
     env_path: AnyPath = src_file if src_file.protocol == "s3" else dst_file
@@ -597,3 +615,69 @@ def rewrite_tiff(
         raise RuntimeError(msg) from e
 
     logger.debug("Rewrote GeoTIFF from '%s' to '%s'", src_file.name, dst_file.name)
+
+
+def write_cog(
+    data: np.ndarray,
+    dst_file: AnyPath,
+    profile: dict[str, Any],
+    *,
+    band_names: list[str] | None = None,
+    color_interp: list[ColorInterp] | None = None,
+) -> None:
+    """Write an in-memory array as a Cloud Optimized GeoTIFF.
+
+    Stages ``data`` in a ``rasterio.io.MemoryFile``, then copies it straight
+    to a COG at ``dst_file``.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        Array to write, shaped ``(height, width)`` for a single band or
+        ``(bands, height, width)`` for multiple.
+    dst_file : str | Path | UPath
+        Destination COG (local or S3).
+    profile : dict[str, Any]
+        Rasterio creation profile for the staging write, as for
+        ``rasterio.open(..., "w")``: must include ``dtype``, ``count``,
+        ``width``, ``height``, ``crs``, ``transform``, and ``nodata``. Merged
+        onto :data:`RASTERIO_PROFILE_DEFAULTS` via :func:`build_rasterio_profile`.
+    band_names : list[str] or None, optional
+        Band descriptions, one per band.
+    color_interp : list[ColorInterp] or None, optional
+        Per-band color interpretation.
+
+    Raises
+    ------
+    RuntimeError
+        If the write fails.
+    """
+    dst_file = UPath(dst_file)
+    work_dst = dst_file.with_name(f".{dst_file.name}.tmp")
+
+    mem_profile = build_rasterio_profile(profile)
+    mem_profile.pop("driver", None)  # staging file is always GTiff
+
+    try:
+        with MemoryFile() as memfile:
+            with memfile.open(driver="GTiff", **mem_profile) as mem_ds:
+                if data.ndim == 2:  # noqa: PLR2004
+                    mem_ds.write(data, 1)
+                else:
+                    mem_ds.write(data)
+                if band_names is not None:
+                    for i, name in enumerate(band_names, 1):
+                        mem_ds.set_band_description(i, name)
+                if color_interp is not None:
+                    mem_ds.colorinterp = color_interp
+
+            with _env_for_path(dst_file):
+                rasterio.shutil.copy(memfile.name, _to_gdal_uri(work_dst), **COG_PROFILE)
+
+        work_dst.rename(dst_file)
+    except Exception as e:
+        work_dst.unlink(missing_ok=True)
+        msg = f"Failed to write COG: {e}"
+        raise RuntimeError(msg) from e
+
+    logger.debug("Wrote COG to '%s'", dst_file.name)
