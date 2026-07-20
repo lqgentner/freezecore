@@ -298,7 +298,7 @@ def _inject_band_metadata(
     """
     if band_names is None and color_interp is None:
         return
-    with rasterio_open(dst_file, "r+") as ds:
+    with rasterio_open(dst_file, "r+", IGNORE_COG_LAYOUT_BREAK="YES") as ds:
         if band_names is not None:
             for i, name in enumerate(band_names, 1):
                 ds.set_band_description(i, name)
@@ -573,11 +573,7 @@ def rewrite_tiff(
     """
     src_file = UPath(src_file)
     dst_file = UPath(dst_file)
-
-    # GDAL CreateCopy can't read and write the same file, so route in-place
-    # rewrites through a sibling temp file and rename on success.
     in_place = src_file == dst_file
-    work_dst = dst_file.with_name(f".{dst_file.name}.tmp") if in_place else dst_file
 
     dst_profile = build_rasterio_profile(profile)
     driver = dst_profile.pop("driver", "GTiff")
@@ -595,22 +591,47 @@ def rewrite_tiff(
 
     # Prefer an S3 path (source or dst) so AWS credentials are installed.
     env_path: AnyPath = src_file if src_file.protocol == "s3" else dst_file
+    # GDAL CreateCopy can't read and write the same file at once. On S3, a
+    # sibling temp *object* plus an fsspec rename hits stale-listing errors,
+    # because GDAL's own S3 writes never touch s3fs's directory cache -- so
+    # stage in memory instead and overwrite the key directly. Locally, a
+    # sibling temp file plus an os.rename is simpler and doesn't have that
+    # problem, so keep using it there.
+    in_place_via_memory = in_place and dst_file.protocol == "s3"
+    local_in_place = in_place and not in_place_via_memory
+    work_dst = dst_file.with_name(f".{dst_file.name}.tmp") if local_in_place else dst_file
 
     try:
         with _env_for_path(env_path):
-            rasterio.shutil.copy(
-                _to_gdal_uri(src_file),
-                _to_gdal_uri(work_dst),
-                driver=driver,
-                **dst_profile,
-            )
-        _inject_band_metadata(work_dst, band_names=band_names, color_interp=color_interp)
-        if in_place:
+            if in_place_via_memory:
+                with MemoryFile() as memfile:
+                    rasterio.shutil.copy(_to_gdal_uri(src_file), memfile.name, driver="GTiff")
+                    _inject_band_metadata(
+                        memfile.name,
+                        band_names=band_names,
+                        color_interp=color_interp,
+                    )
+                    rasterio.shutil.copy(
+                        memfile.name,
+                        _to_gdal_uri(dst_file),
+                        driver=driver,
+                        **dst_profile,
+                    )
+            else:
+                rasterio.shutil.copy(
+                    _to_gdal_uri(src_file),
+                    _to_gdal_uri(work_dst),
+                    driver=driver,
+                    **dst_profile,
+                )
+                _inject_band_metadata(work_dst, band_names=band_names, color_interp=color_interp)
+        if local_in_place:
             work_dst.rename(dst_file)
-        elif src_file != dst_file:
+        elif not in_place and src_file != dst_file:
             src_file.unlink()
     except Exception as e:
-        work_dst.unlink(missing_ok=True)
+        if not in_place_via_memory:
+            work_dst.unlink(missing_ok=True)
         msg = f"Failed to rewrite GeoTIFF: {e}"
         raise RuntimeError(msg) from e
 
@@ -653,7 +674,14 @@ def write_cog(
         If the write fails.
     """
     dst_file = UPath(dst_file)
-    work_dst = dst_file.with_name(f".{dst_file.name}.tmp")
+    # On S3, write the key directly: PutObject is atomic per key, so a failed
+    # write leaves nothing behind, and there's no local rename needed (which
+    # would otherwise hit stale-listing errors in s3fs, since GDAL's own S3
+    # writes never touch its directory cache). Locally, stage via a sibling
+    # temp file and swap in with an atomic rename, so a resumed run can't
+    # mistake a partially-written file for a finished one.
+    is_s3 = dst_file.protocol == "s3"
+    work_dst = dst_file if is_s3 else dst_file.with_name(f".{dst_file.name}.tmp")
 
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)  # staging file is always GTiff
@@ -674,9 +702,11 @@ def write_cog(
             with _env_for_path(dst_file):
                 rasterio.shutil.copy(memfile.name, _to_gdal_uri(work_dst), **COG_PROFILE)
 
-        work_dst.rename(dst_file)
+        if not is_s3:
+            work_dst.rename(dst_file)
     except Exception as e:
-        work_dst.unlink(missing_ok=True)
+        if not is_s3:
+            work_dst.unlink(missing_ok=True)
         msg = f"Failed to write COG: {e}"
         raise RuntimeError(msg) from e
 
