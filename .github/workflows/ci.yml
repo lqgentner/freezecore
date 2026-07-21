@@ -69,7 +69,9 @@ jobs:
           uv pip install --resolution lowest-direct ".[s3]"
           uv pip install pytest pytest-cov
       - name: Run tests
-        run: uv run --no-project pytest -q
+        # Invoke the venv's pytest directly; `uv run` would ignore this .venv
+        # and build a fresh (latest-Python) environment without pytest.
+        run: .venv/bin/pytest -q
 
   test-s3:
     # Exercises the credentialed S3 read/write paths (`_s3_env`) against a real

@@ -14,7 +14,6 @@ import numpy as np
 from odc.geo.geobox import GeoBox
 import pandas as pd
 from pyproj import CRS, Transformer
-from rasterio import features
 import shapely
 from shapely import box, union_all
 from shapely.geometry.base import BaseGeometry
