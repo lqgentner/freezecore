@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     import geopandas as gpd
     import pandas as pd
 
+_VALID_CASE_TYPES = ("lower", "upper", "snake", "preserve")
+
 
 @overload
 def clean_names(df: gpd.GeoDataFrame, case_type: str = ...) -> gpd.GeoDataFrame: ...
@@ -41,7 +43,8 @@ def clean_names(
     Raises
     ------
     ValueError
-        If ``case_type`` is not one of the accepted values.
+        If ``case_type`` is not one of the accepted values, or if two source
+        columns normalize to the same name (which would silently drop a column).
 
     Examples
     --------
@@ -54,6 +57,11 @@ def clean_names(
        aloha  bell_chart  camel_case
     0      1           2           3
     """
+    # Validate up front so an invalid `case_type` fails even for an empty
+    # (zero-column) DataFrame, where `transform` would otherwise never run.
+    if case_type not in _VALID_CASE_TYPES:
+        msg = f"Unknown case_type: {case_type!r}. Valid options: {_VALID_CASE_TYPES}."
+        raise ValueError(msg)
 
     def to_snake(name: str) -> str:
         name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
@@ -70,10 +78,20 @@ def clean_names(
                 return name.upper()
             case "snake":
                 return to_snake(name)
-            case "preserve":
+            case _:  # "preserve"
                 return name
-            case _:
-                msg = f"Unknown case_type: {case_type!r}"
-                raise ValueError(msg)
 
-    return df.rename(columns=transform)
+    new_names = [transform(col) for col in df.columns]
+    # Guard against normalization collisions, which pandas would resolve by
+    # silently keeping only the last duplicate column.
+    seen: dict[str, object] = {}
+    for original, new in zip(df.columns, new_names, strict=True):
+        if new in seen:
+            msg = (
+                f"Cleaning columns with case_type={case_type!r} maps both "
+                f"{seen[new]!r} and {original!r} to {new!r}."
+            )
+            raise ValueError(msg)
+        seen[new] = original
+
+    return df.rename(columns=dict(zip(df.columns, new_names, strict=True)))
