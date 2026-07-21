@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import copy
+import re
 from typing import TYPE_CHECKING, Any, overload
 
 from affine import Affine
@@ -13,6 +14,7 @@ import numpy as np
 from odc.geo.geobox import GeoBox
 import pandas as pd
 from pyproj import CRS, Transformer
+from rasterio import features
 import shapely
 from shapely import box, union_all
 from shapely.geometry.base import BaseGeometry
@@ -29,6 +31,30 @@ if TYPE_CHECKING:
     Hemisphere = Literal["N", "S"]
 
 WGS84 = CRS.from_epsg(4326)
+
+_MIN_UTM_ZONE = 1
+_MAX_UTM_ZONE = 60
+_VALID_HEMISPHERES = ("N", "S")
+
+
+def _validate_hemisphere(hemisphere: ArrayLike) -> None:
+    """Raise ``ValueError`` unless every hemisphere value is exactly ``'N'`` or ``'S'``."""
+    arr = np.asarray(hemisphere)
+    valid = np.isin(arr, _VALID_HEMISPHERES)
+    if not valid.all():
+        bad = np.unique(arr[~valid]).tolist()
+        msg = f"Hemisphere must be one of {_VALID_HEMISPHERES}, got {bad}."
+        raise ValueError(msg)
+
+
+def _validate_zone(zone: ArrayLike) -> None:
+    """Raise ``ValueError`` unless every UTM zone is in the range 1-60."""
+    arr = np.asarray(zone)
+    out_of_range = (arr < _MIN_UTM_ZONE) | (arr > _MAX_UTM_ZONE)
+    if out_of_range.any():
+        bad = np.unique(arr[out_of_range]).tolist()
+        msg = f"UTM zone must be in [{_MIN_UTM_ZONE}, {_MAX_UTM_ZONE}], got {bad}."
+        raise ValueError(msg)
 
 
 @overload
@@ -94,16 +120,29 @@ _NORTHERN_EXCEPTION_ZONES = {
 
 
 def utms_to_epsgs(zone: ArrayLike, hemisphere: ArrayLike) -> NDArray[np.integer]:
-    """Convert a UTM zones and hemispheres to numeric EPSG codes.
+    """Convert UTM zones and hemispheres to numeric EPSG codes.
+
+    Accepts scalars, lists, or arrays. ``zone`` and ``hemisphere`` are
+    broadcast against each other with NumPy, so a scalar hemisphere pairs
+    with an array of zones and vice versa.
 
     Returns
     -------
     NDArray[np.integer]
         EPSG codes (326xx for north, 327xx for south).
+
+    Raises
+    ------
+    ValueError
+        If any zone is outside 1-60 or any hemisphere is not ``'N'``/``'S'``.
     """
-    is_south = hemisphere == "S"
+    zone_arr = np.asarray(zone)
+    hemisphere_arr = np.asarray(hemisphere)
+    _validate_zone(zone_arr)
+    _validate_hemisphere(hemisphere_arr)
+    is_south = hemisphere_arr == "S"
     base = np.where(is_south, 32700, 32600)
-    return np.asarray(base + zone)
+    return np.asarray(base + zone_arr)
 
 
 def utm_to_crs(zone: int, hemisphere: Hemisphere) -> CRS:
@@ -113,10 +152,40 @@ def utm_to_crs(zone: int, hemisphere: Hemisphere) -> CRS:
     -------
     CRS
         The ``pyproj.CRS`` for the UTM zone.
+
+    Raises
+    ------
+    ValueError
+        If ``zone`` is outside 1-60 or ``hemisphere`` is not ``'N'``/``'S'``.
     """
+    _validate_zone(zone)
+    _validate_hemisphere(hemisphere)
     base = 32700 if hemisphere == "S" else 32600
     epsg = base + int(zone)
     return CRS.from_epsg(epsg)
+
+
+# MGRS grammar: 1-2 digit zone, one band letter (C-X, excluding I/O), a
+# two-letter 100 km square id (columns A-Z excl. I/O, rows A-V excl. I/O), and
+# an even number of location digits (2 per precision level; 2 digits = 10 km).
+_MGRS_RE = re.compile(
+    r"^(?P<zone>\d{1,2})(?P<band>[C-HJ-NP-X])(?P<square>[A-HJ-NP-Z]{2})(?P<digits>\d*)$",
+    re.IGNORECASE,
+)
+_MGRS_10KM_DIGITS = 2
+
+
+def _parse_mgrs(mgrs_code: str) -> re.Match[str]:
+    """Parse an MGRS reference, raising ``ValueError`` on malformed input."""
+    match = _MGRS_RE.match(mgrs_code.strip())
+    if match is None:
+        msg = f"Malformed MGRS reference: {mgrs_code!r}"
+        raise ValueError(msg)
+    digits = match.group("digits")
+    if len(digits) % 2 != 0:
+        msg = f"MGRS reference {mgrs_code!r} has an odd number of location digits."
+        raise ValueError(msg)
+    return match
 
 
 def mgrs_to_crs(mgrs_code: str) -> CRS:
@@ -125,7 +194,8 @@ def mgrs_to_crs(mgrs_code: str) -> CRS:
     Parameters
     ----------
     mgrs_code : str
-        An MGRS grid reference (e.g. ``"32TMT64"``).
+        An MGRS grid reference (e.g. ``"32TMT64"``). Single-digit zones such as
+        ``"4QFJ15"`` are accepted.
 
     Returns
     -------
@@ -135,14 +205,12 @@ def mgrs_to_crs(mgrs_code: str) -> CRS:
     Raises
     ------
     ValueError
-        If the reference is too short (fewer than 3 characters).
+        If the reference is malformed or the zone is outside 1-60.
     """
-    _min_mgrs_len = 3
-    if len(mgrs_code) < _min_mgrs_len:
-        msg = f"MGRS mgrs_code is too short: {mgrs_code!r}"
-        raise ValueError(msg)
-    zone = int(mgrs_code[:2])
-    band = mgrs_code[2]
+    match = _parse_mgrs(mgrs_code)
+    zone = int(match.group("zone"))
+    _validate_zone(zone)
+    band = match.group("band").upper()
     epsg = (32700 if band in _SOUTHERN_BANDS else 32600) + zone
     return CRS.from_epsg(epsg)
 
@@ -187,7 +255,28 @@ class MGRSGeoBox(GeoBox):
         -------
         MGRSGeoBox
             The grid square as a GeoBox.
+
+        Raises
+        ------
+        ValueError
+            If ``resolution`` is not positive, does not evenly divide the 10 km
+            cell, or ``mgrs_code`` is not a 10 km reference (two location
+            digits, e.g. ``"32TMT64"``).
         """
+        if resolution <= 0:
+            msg = f"resolution must be positive, got {resolution}."
+            raise ValueError(msg)
+        if not (_10KM_SIZE / resolution).is_integer():
+            msg = f"resolution {resolution} must evenly divide the 10 km cell size."
+            raise ValueError(msg)
+        match = _parse_mgrs(mgrs_code)
+        if len(match.group("digits")) != _MGRS_10KM_DIGITS:
+            msg = (
+                f"{mgrs_code!r} is not a 10 km MGRS reference "
+                f"(expected {_MGRS_10KM_DIGITS} location digits)."
+            )
+            raise ValueError(msg)
+
         converter = mgrs.MGRS()
         zone, hemisphere, easting, northing = converter.MGRSToUTM(mgrs_code)
         crs = utm_to_crs(zone, hemisphere)
@@ -215,19 +304,36 @@ class UTMZones:
         self.gdf = self._build_zones()
 
     def get_zone_geometry(self, zone: int, hemisphere: Hemisphere) -> BaseGeometry:
-        """Return the WGS84 geometry of a single UTM zone."""
+        """Return the WGS84 geometry of a single UTM zone.
+
+        Raises
+        ------
+        ValueError
+            If ``zone``/``hemisphere`` are invalid or name no known zone.
+        """
+        _validate_zone(zone)
+        _validate_hemisphere(hemisphere)
         gdf = self.gdf
-        return gdf[(gdf.zone == zone) & (gdf.hemisphere == hemisphere)].iloc[0].geometry
+        matches = gdf[(gdf.zone == zone) & (gdf.hemisphere == hemisphere)]
+        if matches.empty:
+            msg = f"No UTM zone found for zone={zone!r}, hemisphere={hemisphere!r}."
+            raise ValueError(msg)
+        return matches.iloc[0].geometry
 
     def find_intersecting(self, geometry: GeoArray | GeoSeries | BaseGeometry) -> gpd.GeoDataFrame:
-        """Return UTM zones that intersect the given geometry."""
-        # if isinstance(geometry, np.ndarray):
-        #     geometry = gpd.GeoSeries(geometry)
-        hits = self.gdf.sindex.query(geometry, predicate="intersects")[1]
-        mask = pd.Series(data=False, index=self.gdf.index)
-        mask[hits] = True
+        """Return UTM zones that intersect the given geometry.
 
-        return self.gdf[mask]
+        Accepts a single scalar geometry or an array/series of geometries.
+        For a scalar query, ``sindex.query`` returns a 1-D array of positional
+        matches; for a bulk query it returns a 2-D ``(input_idx, tree_idx)``
+        array whose second row holds the matches.
+        """
+        result = self.gdf.sindex.query(geometry, predicate="intersects")
+        hits = result[1] if result.ndim == 2 else result  # noqa: PLR2004
+        mask = pd.Series(data=False, index=self.gdf.index)
+        mask.iloc[hits] = True
+
+        return self.gdf[mask.to_numpy()]
 
     def _build_zones(self) -> gpd.GeoDataFrame:
         """Generate a GeoDataFrame containing all UTM zones."""
@@ -347,10 +453,14 @@ class MGRSGrid:
             raise ValueError(msg)
         if isinstance(geometry, gpd.GeoDataFrame):
             geoms = geometry.geometry.to_numpy()
-        if isinstance(geometry, GeoSeries):
+        elif isinstance(geometry, GeoSeries):
             geoms = geometry.to_numpy()
-        if isinstance(geometry, BaseGeometry):
+        elif isinstance(geometry, BaseGeometry):
             geoms = np.array([geometry])
+        elif isinstance(geometry, np.ndarray):
+            geoms = geometry
+        else:
+            geoms = np.asarray(geometry, dtype=object)
         # set empty geometries to None to maintain indexing
         non_empty = geoms.copy()
         non_empty[shapely.is_empty(non_empty)] = None
@@ -587,6 +697,7 @@ class MGRSGrid:
             new.northings = self.northings[index]
             new.zones = self.zones[index]
             new.hemispheres = self.hemispheres[index]
+            new.geometries = self.geometries[index]
             return new
         return self._entry_to_geobox(index)
 
