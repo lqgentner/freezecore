@@ -1,6 +1,7 @@
 """Provides vector geometry related tools."""
 
 from pathlib import Path
+from secrets import token_hex
 
 import geopandas as gpd
 from shapely import (
@@ -34,13 +35,21 @@ def save_and_read_parquet(gdf: gpd.GeoDataFrame, out_path: str | Path) -> gpd.Ge
     Notes
     -----
     The function ensures that the output directory exists before saving.
-    It uses the 'pyarrow' engine for writing the Parquet file.
+    It uses the 'pyarrow' engine for writing the Parquet file. The write is
+    staged to a unique sibling temp file and atomically moved into place, so a
+    crash mid-write cannot leave a truncated file at ``out_path``.
 
     """
     out_path = Path(out_path)
     # Make sure the location exists
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    gdf.to_parquet(out_path, engine="pyarrow")
+    tmp_path = out_path.with_name(f".{out_path.name}.{token_hex(8)}.tmp")
+    try:
+        gdf.to_parquet(tmp_path, engine="pyarrow")
+        tmp_path.replace(out_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return gpd.read_parquet(out_path)
 
 
@@ -120,6 +129,8 @@ def _extract_z_values(geom: BaseGeometry) -> list[float]:
         If the geometry type is unknown.
 
     """
+    if geom.is_empty:
+        return []
     if not geom.has_z:
         msg = "Geometry has no Z axis"
         raise ValueError(msg)
@@ -129,20 +140,40 @@ def _extract_z_values(geom: BaseGeometry) -> list[float]:
         case LineString():
             z = [coord[2] for coord in geom.coords]
         case Polygon():
-            z = [coord[2] for coord in geom.exterior.coords]
+            z = _polygon_z_values(geom)
         case MultiPoint():
             z = [point.z for point in geom.geoms]
         case MultiLineString():
             z = [coord[2] for line in geom.geoms for coord in line.coords]
         case MultiPolygon():
-            z = [coord[2] for poly in geom.geoms for coord in poly.exterior.coords]
+            z = [value for poly in geom.geoms for value in _polygon_z_values(poly)]
         case GeometryCollection():
-            z = []
-            for sub_geom in geom.geoms:
-                z.extend(_extract_z_values(sub_geom))
+            z = _collection_z_values(geom)
         case _:
             msg = f"Unsupported geometry type '{type(geom).__name__}'."
             raise TypeError(msg)
+    return z
+
+
+def _polygon_z_values(geom: Polygon) -> list[float]:
+    """Extract Z values from a polygon's exterior and every interior ring."""
+    z = [coord[2] for coord in geom.exterior.coords]
+    for ring in geom.interiors:
+        z.extend(coord[2] for coord in ring.coords)
+    return z
+
+
+def _collection_z_values(geom: GeometryCollection) -> list[float]:
+    """Extract Z from collection members that carry it.
+
+    A collection may mix 2D and 3D members; skipping the members without Z
+    keeps a 2D sibling from aborting the whole traversal.
+    """
+    z: list[float] = []
+    for sub_geom in geom.geoms:
+        if sub_geom.is_empty or not sub_geom.has_z:
+            continue
+        z.extend(_extract_z_values(sub_geom))
     return z
 
 

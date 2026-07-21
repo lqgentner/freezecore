@@ -5,23 +5,35 @@ from dataclasses import asdict, dataclass, field
 import logging
 from pathlib import Path
 import threading
+import weakref
 
 import geopandas as gpd
 import pandas as pd
 
 from freezecore.download import HTTPDownloader
-from freezecore.utils import get_cache_dir
+from freezecore.utils import file_sha256, get_cache_dir
 from freezecore.vectools import save_and_read_parquet
 
 logger = logging.getLogger(__name__)
 
-_path_locks: dict[Path, threading.Lock] = {}
+# In-process locks keyed by resolved path, so aliases of the same file share a
+# lock. A WeakValueDictionary self-cleans: while a thread holds a lock it keeps
+# a strong reference (so contenders share the live lock), and once idle the
+# entry is collected rather than accumulating forever. This coordinates threads
+# only; concurrent *processes* rely on the atomic writes in `_prepare`/`_download`
+# (the same approach pooch takes) rather than a cross-process lock.
+_path_locks: weakref.WeakValueDictionary[Path, threading.Lock] = weakref.WeakValueDictionary()
 _path_locks_mutex = threading.Lock()
 
 
 def _get_path_lock(path: Path) -> threading.Lock:
+    key = path.resolve()
     with _path_locks_mutex:
-        return _path_locks.setdefault(path, threading.Lock())
+        lock = _path_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _path_locks[key] = lock
+        return lock
 
 
 @dataclass(frozen=True)
@@ -36,6 +48,10 @@ class DatasetMetadata:
     version: str | None = None
     description: str | None = None
     doi: str | None = None
+    # Optional known-good SHA-256 of the raw download. When set, the raw file is
+    # verified against it after download and before use (the pooch model); a
+    # mismatch raises rather than silently trusting a corrupt or wrong file.
+    sha256: str | None = None
     # Catch-all for additional fields (specific to subclass)
     additional_fields: dict[str, str] = field(default_factory=dict)
 
@@ -119,9 +135,14 @@ class GeoVectorData(ABC):
             self._verify(download=download)
         return self._load_data()
 
-    def remove(self, *, raw: bool = True, processed: bool = True) -> None:
+    def cleanup(self, *, raw: bool = True, processed: bool = False) -> None:
         """
-        Remove raw and/or processed dataset files.
+        Remove cached dataset files, keeping the processed data by default.
+
+        By default removes only the raw download to free cache space while
+        keeping the processed GeoParquet. Pass ``processed=True`` to also remove
+        the processed data (e.g. to wipe the dataset entirely), or
+        ``raw=False, processed=True`` to remove only the processed data.
 
         Overwrite this method if the raw or processed paths are directories
         (e.g., an extracted ZIP) instead of single files.
@@ -138,6 +159,10 @@ class GeoVectorData(ABC):
             _remove_file_and_cleanup_dir(self.raw_path)
         if processed:
             _remove_file_and_cleanup_dir(self.processed_path)
+            # Removing the processed file invalidates the cached verification;
+            # otherwise a later `get_data()` would skip re-verification and try
+            # to read a file that no longer exists.
+            self._verified = False
 
     def _load_data(self) -> gpd.GeoDataFrame:
         """Return the GeoDataFrame."""
@@ -164,14 +189,34 @@ class GeoVectorData(ABC):
                 self._verified = True
                 return
             if self.raw_path.exists():
+                self._verify_raw_checksum()
                 self._prepare()
             elif download:
                 self._download()
+                self._verify_raw_checksum()
                 self._prepare()
             else:
                 msg = "Dataset not found. Set `download=True` to automatically download."
                 raise FileNotFoundError(msg)
             self._verified = True
+
+    def _verify_raw_checksum(self) -> None:
+        """Verify the raw file against ``metadata.sha256`` when one is provided.
+
+        A no-op when no expected hash is configured. On mismatch, raises
+        ``ValueError`` so a corrupt or wrong download is never silently used.
+        """
+        expected = self.metadata.sha256
+        if not expected:
+            return
+        actual = file_sha256(self.raw_path)
+        if actual.lower() != expected.lower():
+            msg = (
+                f"Checksum mismatch for '{self.raw_path.name}': "
+                f"expected {expected}, got {actual}. The download may be corrupt; "
+                "remove it (`remove(processed=False)`) and retry with `download=True`."
+            )
+            raise ValueError(msg)
 
     def __repr__(self) -> str:
         """Return the technical string representation."""

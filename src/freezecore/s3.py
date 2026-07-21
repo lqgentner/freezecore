@@ -18,9 +18,10 @@ from s3fs.core import set_custom_error_handler
 from upath import UPath
 
 # Observed as transient on both the CDSE eodata gateway and Ceph-based S3
-# gateways: 403/SignatureDoesNotMatch under clock-skew or auth-refresh races,
-# 408/RequestTimeout under load.
-TRANSIENT_S3_ERROR_CODES = frozenset({"403", "SignatureDoesNotMatch", "408", "RequestTimeout"})
+# gateways under clock-skew, auth-refresh races, or load.
+TRANSIENT_S3_ERROR_CODES = frozenset(
+    {"SignatureDoesNotMatch", "RequestTimeTooSkewed", "RequestTimeout"},
+)
 
 # botocore retry budget for a single S3 API call (e.g. one HeadObject). "adaptive"
 # mode adds client-side rate limiting on top of exponential backoff, which helps
