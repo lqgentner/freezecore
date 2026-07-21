@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import partial
 import logging
+import ntpath
 from pathlib import Path
+import posixpath
 import re
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from secrets import token_hex
+from typing import TYPE_CHECKING, Any, TypeVar, cast, overload
 from urllib.parse import unquote, urljoin, urlparse
 
 import requests
@@ -36,10 +39,28 @@ DEFAULT_TIMEOUT = 30
 CHUNK_SIZE = 1024 * 1024  # 1 MiB
 REMOTE_BLOCK_SIZE = 64 * 1024 * 1024  # 64 MiB
 
+# Bound manual redirect following (mirrors the `requests` default).
+MAX_REDIRECTS = 30
+
 logger = logging.getLogger(__name__)
 
 # HTTP status codes considered transient and worth retrying.
 TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 429, 502, 503, 504})
+
+# Redirect status codes that rewrite the request method (per RFC 7231 / browsers).
+_HTTP_MOVED_PERMANENTLY = 301
+_HTTP_FOUND = 302
+_HTTP_SEE_OTHER = 303
+
+# Control characters (C0 range plus DEL) are never valid in a saved filename.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# Case-insensitive Windows reserved device names (a leading stem match is enough).
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)},
+)
 
 # Return type for retry_request
 WrappedFn = TypeVar("WrappedFn", bound=Callable[..., Any])
@@ -157,10 +178,14 @@ class HTTPDownloader:
 
         """
         self.session = requests.Session()
+        # Auth is tracked on the instance and passed per-request rather than
+        # stored on the session, so a redirect that leaves a trusted host can
+        # drop credentials for that single hop without permanently mutating
+        # shared state (which would break later calls on this downloader).
+        self._auth = auth
         if auth is not None:
             # Handle redirects manually to allow for auth preservation
             kwargs.setdefault("allow_redirects", False)
-            self.session.auth = auth
         if trusted_hosts is None:
             trusted_hosts = []
         elif isinstance(trusted_hosts, str):
@@ -179,6 +204,8 @@ class HTTPDownloader:
         url: str,
         save_dir: str | Path,
         filename: str | None = None,
+        *,
+        overwrite: bool = False,
     ) -> Path: ...
     @overload
     def __call__(
@@ -186,6 +213,8 @@ class HTTPDownloader:
         url: str,
         save_dir: UPath,
         filename: str | None = None,
+        *,
+        overwrite: bool = False,
     ) -> UPath: ...
     @retry_request(logger=logger)
     def __call__(
@@ -193,6 +222,8 @@ class HTTPDownloader:
         url: str,
         save_dir: str | Path | UPath,
         filename: str | None = None,
+        *,
+        overwrite: bool = False,
     ) -> Path | UPath:
         """
         Download a file from a URL to a directory with optional progress bar.
@@ -209,11 +240,25 @@ class HTTPDownloader:
         filename : str, optional
             The filename of the downloaded file.
             If not provided, the filename will be inferred from the HTML header or URL.
+            Whether provided or inferred, the name is validated to be a single
+            path component confined to ``save_dir``; absolute paths, directory
+            separators, ``..``, control characters, and reserved device names
+            are rejected.
+        overwrite : bool, default False
+            If ``False`` (the default), raise ``FileExistsError`` when the
+            target already exists. If ``True``, replace it.
 
         Returns
         -------
         Path or UPath
             The path of the downloaded file.
+
+        Raises
+        ------
+        ValueError
+            If the resolved filename is unsafe or escapes ``save_dir``.
+        FileExistsError
+            If the target exists and ``overwrite`` is ``False``.
 
         """
         response = self._follow_redirects(url)
@@ -226,6 +271,7 @@ class HTTPDownloader:
             )
             raise RuntimeError(msg)
 
+        explicit_filename = filename is not None
         if not filename:
             cd = response.headers.get("Content-Disposition")
             filename = _extract_filename_from_cd(cd) or _extract_filename_from_url(url)
@@ -233,31 +279,63 @@ class HTTPDownloader:
                 msg = "Could not infer filename. Please specify with `filename=` argument."
                 raise RuntimeError(msg)
 
+        safe_name = _sanitize_filename(filename, explicit=explicit_filename)
+
         if isinstance(save_dir, str):
             save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
-        filepath = save_dir / filename
-        logger.info("Downloading '%s' from '%s' to '%s'.", filename, url, str(save_dir))
-        return _write_file(response, filepath, show_progress=self.show_progress)
+        filepath = _resolve_within(save_dir, safe_name)
+        logger.info("Downloading '%s' from '%s' to '%s'.", safe_name, url, str(save_dir))
+        return _write_file(
+            response,
+            filepath,
+            show_progress=self.show_progress,
+            overwrite=overwrite,
+        )
 
     def _follow_redirects(self, url: str) -> requests.Response:
-        """Follow redirects, dropping auth when leaving trusted hosts."""
-        with self.session as session:
-            response = session.request(url=url, **self.kwargs)
+        """Follow redirects manually, bounding depth and protecting credentials.
+
+        Credentials are sent only while the hop stays on a trusted host and on
+        an HTTPS connection; leaving a trusted host or downgrading to plaintext
+        drops them for the remainder of the chain. Each intermediate streamed
+        response is closed before the next request, and the redirect method is
+        rewritten to mirror ``requests``/browser behavior (303 and 301/302 on
+        POST become GET; 307/308 preserve the method).
+        """
+        auth = self._auth
+        kwargs = dict(self.kwargs)
+        method = kwargs.pop("method", "GET")
+
+        for _ in range(MAX_REDIRECTS + 1):
+            response = self.session.request(method, url=url, auth=auth, **kwargs)
             if not response.is_redirect:
                 return response
+
             location = response.headers["Location"]
+            prev_parsed = urlparse(response.url)
+            # Release the streamed connection before following the redirect.
+            response.close()
+
             new_url = urljoin(response.url, location)
-            new_host = urlparse(new_url).hostname
-            prev_host = urlparse(response.url).hostname
-            if new_host is None:
+            new_parsed = urlparse(new_url)
+            if new_parsed.hostname is None:
                 msg = "Hostname not found in redirect Location header."
                 raise RuntimeError(msg)
 
-            is_trusted = new_host == prev_host or new_host in self.trusted_hosts
-            if not is_trusted:
-                self.session.auth = None
-            return self._follow_redirects(new_url)
+            is_trusted = (
+                new_parsed.hostname == prev_parsed.hostname
+                or new_parsed.hostname in self.trusted_hosts
+            )
+            is_downgrade = prev_parsed.scheme == "https" and new_parsed.scheme != "https"
+            if not is_trusted or is_downgrade:
+                auth = None
+
+            method, kwargs = _rewrite_redirect_method(response.status_code, method, kwargs)
+            url = new_url
+
+        msg = f"Exceeded maximum of {MAX_REDIRECTS} redirects for URL."
+        raise RuntimeError(msg)
 
 
 def _is_downloadable_content(response: requests.Response) -> bool:
@@ -292,15 +370,24 @@ def _write_file[T: Path | UPath](
     filepath: T,
     *,
     show_progress: bool = True,
+    overwrite: bool = False,
 ) -> T:
     """
     Stream a response body to a file with an optional rich progress bar.
 
-    Local destinations stream to a sibling ``.partial`` file and rename
+    Local destinations stream to a unique sibling ``.partial`` file and rename
     on success. Remote destinations (e.g. ``UPath`` on S3) write directly
     to the final path with an increased fsspec ``block_size``.
 
+    Raises
+    ------
+    FileExistsError
+        If ``filepath`` already exists and ``overwrite`` is ``False``.
     """
+    if not overwrite and filepath.exists():
+        msg = f"Target already exists: '{filepath}'. Pass `overwrite=True` to replace it."
+        raise FileExistsError(msg)
+
     filename = shorten_string(filepath.name, 30)
     progress = create_progress(show_progress=show_progress, columns=_DOWNLOAD_COLUMNS)
     total = _get_filesize(response)
@@ -308,7 +395,9 @@ def _write_file[T: Path | UPath](
     # `UPath("/tmp/x")` is a Path subclass (PosixUPath), `UPath("s3://...")` is not,
     # so isinstance(_, Path) separates local from remote.
     if isinstance(filepath, Path):
-        partial_filepath = filepath.with_suffix(filepath.suffix + ".partial")
+        # A unique suffix keeps concurrent writers to the same target from
+        # clobbering one another's partial file.
+        partial_filepath = filepath.with_name(f"{filepath.name}.{token_hex(8)}.partial")
         try:
             with progress:
                 task_id = progress.add_task("Download", filename=filename, total=total)
@@ -317,7 +406,7 @@ def _write_file[T: Path | UPath](
                         f.write(chunk)
                         progress.update(task_id, advance=len(chunk))
                 progress.update(task_id, refresh=True)
-            partial_filepath.rename(str(filepath))
+            partial_filepath.replace(filepath)
         except BaseException:
             partial_filepath.unlink(missing_ok=True)
             raise
@@ -333,6 +422,87 @@ def _write_file[T: Path | UPath](
     return filepath
 
 
+def _rewrite_redirect_method(
+    status_code: int,
+    method: str,
+    kwargs: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Rewrite the request method/body for a redirect, mirroring ``requests``.
+
+    A 303 (and a 301/302 on a POST) becomes a bodyless GET; 307/308 preserve
+    the original method and body.
+    """
+    new_method = method
+    becomes_get = (status_code == _HTTP_SEE_OTHER and method != "HEAD") or (
+        status_code in (_HTTP_MOVED_PERMANENTLY, _HTTP_FOUND) and method == "POST"
+    )
+    if becomes_get:
+        new_method = "GET"
+
+    new_kwargs = dict(kwargs)
+    if new_method != method:
+        for body_key in ("data", "json", "files"):
+            new_kwargs.pop(body_key, None)
+    return new_method, new_kwargs
+
+
+def _sanitize_filename(filename: str, *, explicit: bool) -> str:
+    """Validate that ``filename`` is a safe, single path component.
+
+    Rejects absolute paths, directory separators, ``..``, control characters,
+    and Windows reserved device names, whether the name was supplied explicitly
+    or inferred from a server header or URL.
+
+    Raises
+    ------
+    ValueError
+        If the name is unsafe.
+    """
+    source = "provided" if explicit else "inferred"
+    if not filename or filename in (".", ".."):
+        msg = f"Refusing {source} filename {filename!r}: not a valid file name."
+        raise ValueError(msg)
+    if _CONTROL_CHARS_RE.search(filename):
+        msg = f"Refusing {source} filename {filename!r}: contains control characters."
+        raise ValueError(msg)
+    if "/" in filename or "\\" in filename:
+        msg = f"Refusing {source} filename {filename!r}: contains a directory separator."
+        raise ValueError(msg)
+    if ":" in filename:
+        # Guards against Windows drive letters (``C:...``) and NTFS alternate
+        # data streams (``name:stream``).
+        msg = f"Refusing {source} filename {filename!r}: contains ':'."
+        raise ValueError(msg)
+    if posixpath.isabs(filename) or ntpath.isabs(filename):
+        msg = f"Refusing {source} filename {filename!r}: is an absolute path."
+        raise ValueError(msg)
+    # ``basename`` on either platform must be a no-op for a bare file name.
+    if posixpath.basename(filename) != filename or ntpath.basename(filename) != filename:
+        msg = f"Refusing {source} filename {filename!r}: not a bare file name."
+        raise ValueError(msg)
+    stem = filename.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        msg = f"Refusing {source} filename {filename!r}: reserved device name."
+        raise ValueError(msg)
+    return filename
+
+
+def _resolve_within[T: Path | UPath](save_dir: T, filename: str) -> T:
+    """Join ``filename`` under ``save_dir`` and confirm it does not escape it.
+
+    ``filename`` is expected to already be a sanitized bare name; this is a
+    defense-in-depth check that also catches symlink-based escapes locally.
+    """
+    target = save_dir / filename
+    if isinstance(save_dir, Path):
+        resolved_dir = save_dir.resolve()
+        resolved_target = target.resolve()
+        if resolved_target.parent != resolved_dir:
+            msg = f"Filename {filename!r} escapes destination directory '{save_dir}'."
+            raise ValueError(msg)
+    return cast("T", target)
+
+
 def _extract_filename_from_cd(cd: str | None) -> str | None:
     """
     Extract the filename from the Content-Disposition HTML headers field.
@@ -343,10 +513,13 @@ def _extract_filename_from_cd(cd: str | None) -> str | None:
     if not cd:
         return None
 
-    # RFC 5987: filename*=charset'language'encoded-value (e.g. UTF-8''name.zip)
-    rfc5987_match = re.search(r"filename\*=([^']+)'[^']*'([^;\s]+)", cd, re.IGNORECASE)
+    # RFC 5987: filename*=charset'language'encoded-value (e.g. UTF-8''name.zip).
+    # The value is percent-encoded, so decode it before returning (the caller
+    # then validates it; percent-encoded traversal like %2e%2e%2f is caught there).
+    rfc5987_match = re.search(r"filename\*=([^']*)'[^']*'([^;\s]+)", cd, re.IGNORECASE)
     if rfc5987_match:
-        return rfc5987_match.group(2)
+        charset = rfc5987_match.group(1) or "utf-8"
+        return unquote(rfc5987_match.group(2), encoding=charset, errors="replace")
 
     # Plain filename= with optional quotes
     plain_match = re.search(r'filename="([^"]+)"|filename=([^;\s]+)', cd, re.IGNORECASE)
