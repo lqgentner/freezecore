@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import wraps
+import hashlib
 from importlib.util import find_spec
 import logging
 import os
@@ -136,7 +137,7 @@ def get_data_dir(data_dir: str | Path | None = None) -> Path:
     """
     data_dir = data_dir or os.getenv("FREEZECORE_DATA") or os.getenv("DEEPFREEZER_DATA")
     if data_dir:
-        return Path(data_dir)
+        return Path(data_dir).expanduser()
     msg = (
         "Data directory must be provided via 'data_dir' parameter "
         "or 'FREEZECORE_DATA' environment variable"
@@ -153,20 +154,28 @@ def shorten_string(string: str, n: int) -> str:
     string : str
         The string to shorten.
     n : int
-        Maximum length of the returned string, including the ellipsis.
+        Maximum length of the returned string, including the ellipsis. Values
+        below zero are treated as zero.
 
     Returns
     -------
     str
         The original string if its length is <= `n`, otherwise a shortened
-        version with ``...`` inserted in the middle.
+        version with ``...`` inserted in the middle. The result never exceeds
+        `n` characters. When `n` is too small to hold the ``...`` marker, the
+        string is hard-truncated to `n` characters without a marker.
     """
-    if len(string) > n:
-        n = n - len("...")
-        n_1 = n // 2 + n % 2
-        n_2 = n // 2
-        string = string[:n_1] + "..." + string[-n_2:]
-    return string
+    n = max(n, 0)
+    if len(string) <= n:
+        return string
+    ellipsis_ = "..."
+    if n <= len(ellipsis_):
+        # No room for the marker; hard-truncate to satisfy the length contract.
+        return string[:n]
+    budget = n - len(ellipsis_)
+    n_1 = budget // 2 + budget % 2
+    n_2 = budget // 2
+    return string[:n_1] + ellipsis_ + string[len(string) - n_2 :]
 
 
 def get_credentials_from_env(username_key: str, password_key: str) -> tuple[str, str]:
@@ -188,22 +197,46 @@ def get_credentials_from_env(username_key: str, password_key: str) -> tuple[str,
     Raises
     ------
     KeyError
-        If either credential is not found or empty
+        If either credential is missing or empty.
 
     """
     username = os.getenv(username_key)
     password = os.getenv(password_key)
 
-    if username is None or password is None:
-        missing_keys = []
-        if username is None:
-            missing_keys.append(username_key)
-        if password is None:
-            missing_keys.append(password_key)
-        msg = f"Variables not found in '.env' file: {', '.join(missing_keys)}"
+    # Treat empty strings as missing: an empty credential is never usable.
+    if not username or not password:
+        missing_keys = [
+            key for key, value in ((username_key, username), (password_key, password)) if not value
+        ]
+        msg = f"Environment variables not set or empty: {', '.join(missing_keys)}"
         raise KeyError(msg)
 
     return username, password
+
+
+_HASH_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+
+
+def file_sha256(path: str | Path, *, chunk_size: int = _HASH_CHUNK_SIZE) -> str:
+    """Compute the SHA-256 hex digest of a file, reading it in chunks.
+
+    Parameters
+    ----------
+    path : str or Path
+        File to hash.
+    chunk_size : int, optional
+        Number of bytes to read per iteration. Defaults to 1 MiB.
+
+    Returns
+    -------
+    str
+        The lowercase hexadecimal SHA-256 digest.
+    """
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def format_valid_options(d: dict[Any, Any]) -> str:
