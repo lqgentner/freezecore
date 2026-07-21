@@ -5,38 +5,66 @@ authors = [
   { name = "Luis Gentner" , email = "luis.gentner@geo.uzh.ch"},
 ]
 readme = "README.md"
-license.file = "LICENSE"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
+keywords = [
+    "geospatial",
+    "mgrs",
+    "utm",
+    "raster",
+    "geotiff",
+    "cog",
+    "vrt",
+    "s3",
+    "sentinel-1",
+    "remote-sensing",
+]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
 ]
 dynamic = ["version"]
+# Lower bounds reflect the oldest release that both supports the required
+# Python (>=3.12) and works with this code. Notably `numpy>=2.0` is required
+# because the code uses `np.concat` (added in NumPy 2.0).
 dependencies = [
-    "affine",
+    "affine>=2.4.0",
     "geopandas>=1.1",
-    "mgrs>=1.4",
-    "numpy>=1.24",
+    "mgrs>=1.4.4",
+    "numpy>=2.0",
     "odc-geo>=0.5.0",
     "pandas>=2.3",
-    "platformdirs",
-    "pyarrow",
-    "pyproj>=3.5",
+    "platformdirs>=3.0",
+    "pyarrow>=17.0",
+    "pyproj>=3.6.1",
     "rasterio>=1.5.0",
-    "requests",
+    "requests>=2.28",
     "rich>=13",
-    "shapely>=2",
-    "tenacity",
+    "shapely>=2.1.0",
+    "tenacity>=8.2",
     "universal-pathlib>=0.3",
 ]
 
 [project.optional-dependencies]
 s3 = [
-    "s3fs>=2026",
-    "fsspec>=2026",
-    "boto3",
+    # s3fs 2026.2.0 first exposes `set_custom_error_handler` (used in s3.py).
+    "s3fs>=2026.2.0",
+    "fsspec>=2026.2.0",
+    "boto3>=1.36",
 ]
+
+[project.urls]
+Homepage = "https://github.com/lqgentner/freezecore"
+Repository = "https://github.com/lqgentner/freezecore"
+Issues = "https://github.com/lqgentner/freezecore/issues"
+Changelog = "https://github.com/lqgentner/freezecore/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
@@ -55,6 +83,24 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/freezecore"]
+
+# Ship a lean, reproducible sdist: the package sources, the test suite (so
+# downstreams can run it), and the project/license/readme metadata -- but not
+# local developer scaffolding (`.python-version`, `.gitignore`, `uv.lock`).
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/freezecore",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "pyproject.toml",
+]
+exclude = [".gitignore"]
+
 [tool.ruff]
 line-length = 99
 src = ["src"]
@@ -158,6 +204,25 @@ testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "integration: tests requiring a live S3-compatible service (MinIO); configured via FREEZECORE_TEST_S3_* env vars, skipped when unset.",
+]
+filterwarnings = [
+    # Raised inside rasterio's compiled _io.pyx read() path under NumPy 2.5;
+    # only a future rasterio release (>1.5.0) can fix it at the source.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+]
 
 [tool.mypy]
 ignore_missing_imports = true
+
+[tool.coverage.run]
+branch = true
+source = ["freezecore"]
+
+[tool.coverage.report]
+# Regression guard, not a target. The floor is intentionally below current
+# coverage because the S3 credential/env paths in `raster.py` need a live
+# object store to exercise; raise this as S3 integration tests land.
+fail_under = 78
+show_missing = true
