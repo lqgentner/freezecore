@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 import logging
 from pathlib import Path
+from secrets import token_hex
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 from pyproj import CRS
@@ -91,7 +92,11 @@ def _s3_env(path: UPath) -> Iterator[None]:
         aws_session_token=storage_options.get("token"),
         region_name=storage_options.get("region_name"),
     )
-    credentials = boto3_session.get_credentials().get_frozen_credentials()
+    # boto3 returns None when no credentials are configured (env, profile, or
+    # instance metadata). Guard against that so anonymous access to a public
+    # bucket falls back to unsigned requests instead of raising AttributeError.
+    raw_credentials = boto3_session.get_credentials()
+    credentials = raw_credentials.get_frozen_credentials() if raw_credentials is not None else None
 
     non_aws_options: dict[str, str] = {
         # /vsis3/ has no native random-write support.
@@ -103,12 +108,15 @@ def _s3_env(path: UPath) -> Iterator[None]:
         # Don't probe for sidecar files on open
         "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     }
-    aws_options: dict[str, str] = {
-        "AWS_ACCESS_KEY_ID": credentials.access_key,
-        "AWS_SECRET_ACCESS_KEY": credentials.secret_key,
-    }
-    if credentials.token:
-        aws_options["AWS_SESSION_TOKEN"] = credentials.token
+    aws_options: dict[str, str] = {}
+    if credentials is not None:
+        aws_options["AWS_ACCESS_KEY_ID"] = credentials.access_key
+        aws_options["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
+        if credentials.token:
+            aws_options["AWS_SESSION_TOKEN"] = credentials.token
+    else:
+        # No credentials: sign nothing, allowing public-bucket reads.
+        non_aws_options["AWS_NO_SIGN_REQUEST"] = "YES"
     if region := boto3_session.region_name:
         aws_options["AWS_REGION"] = region
     if endpoint_url := storage_options.get("endpoint_url"):
@@ -118,10 +126,12 @@ def _s3_env(path: UPath) -> Iterator[None]:
         if endpoint_url.startswith("http://"):
             non_aws_options["AWS_HTTPS"] = "NO"
 
-    rio_env = rasterio.env.Env(
-        session=rasterio.session.AWSSession(boto3_session),
-        **non_aws_options,
+    rio_session = (
+        rasterio.session.AWSSession(boto3_session)
+        if credentials is not None
+        else rasterio.session.AWSSession(aws_unsigned=True)
     )
+    rio_env = rasterio.env.Env(session=rio_session, **non_aws_options)
     gdal_env = (
         gdal.config_options({**non_aws_options, **aws_options})
         if gdal is not None
@@ -328,7 +338,7 @@ def get_utm_zone_string(projparams: Any) -> str:
     try:
         crs = CRS(projparams)
     except CRSError as err:
-        msg = f"Invalid `projparams` {crs}, could not initialize `pyproj.CRS`."
+        msg = f"Invalid `projparams` {projparams!r}, could not initialize `pyproj.CRS`."
         raise ValueError(msg) from err
 
     utm_zone = crs.utm_zone
@@ -363,7 +373,7 @@ def get_epsg_string(projparams: Any) -> str:
     try:
         crs = CRS(projparams)
     except CRSError as err:
-        msg = f"Invalid `projparams` {crs}, could not initialize `pyproj.CRS`."
+        msg = f"Invalid `projparams` {projparams!r}, could not initialize `pyproj.CRS`."
         raise ValueError(msg) from err
 
     epsg_code = crs.to_epsg()
@@ -386,9 +396,25 @@ def utm_zone_to_crs(utm_zone: str) -> CRS:
     -------
     pyproj.CRS
         The coordinate reference system.
+
+    Raises
+    ------
+    ValueError
+        If ``utm_zone`` is malformed, the zone is outside 1-60, or the
+        hemisphere is not ``'N'``/``'S'``.
     """
-    zone_number = int(utm_zone[:-1])
-    hemisphere = utm_zone[-1]
+    hemisphere = utm_zone[-1:]
+    if hemisphere not in ("N", "S"):
+        msg = f"UTM zone hemisphere must be 'N' or 'S', got {utm_zone!r}."
+        raise ValueError(msg)
+    try:
+        zone_number = int(utm_zone[:-1])
+    except ValueError as err:
+        msg = f"Invalid UTM zone string {utm_zone!r}: zone number is not an integer."
+        raise ValueError(msg) from err
+    if not 1 <= zone_number <= 60:  # noqa: PLR2004
+        msg = f"UTM zone must be in [1, 60], got {zone_number} from {utm_zone!r}."
+        raise ValueError(msg)
     # Create UTM CRS: northern hemisphere uses EPSG:326xx, southern uses EPSG:327xx
     epsg_code = 32600 + zone_number if hemisphere == "N" else 32700 + zone_number
     return CRS.from_epsg(epsg_code)
@@ -514,23 +540,50 @@ def merge_tiffs(
 
     logger.info("Merging %d GeoTIFFs into '%s'", len(src_files), dst_file.name)
 
-    # Extract band names and profile from first file
-    with rasterio_open(src_paths[0]) as src:
-        src_profile: dict[str, Any] = src.profile
-        band_names: list[str] = src.descriptions
+    # Read the reference profile/descriptions and validate a common CRS. A
+    # mismatched CRS would make rasterio.merge silently misplace pixels.
+    ref_crs = None
+    src_profile: dict[str, Any] = {}
+    descriptions: tuple[str | None, ...] = ()
+    for i, src_path in enumerate(src_paths):
+        with rasterio_open(src_path) as src:
+            if i == 0:
+                src_profile = dict(src.profile)
+                descriptions = src.descriptions
+                ref_crs = src.crs
+            elif src.crs != ref_crs:
+                msg = (
+                    f"All source files must share a CRS; '{src_path.name}' has {src.crs}, "
+                    f"expected {ref_crs}."
+                )
+                raise ValueError(msg)
+
+    # Rasterio returns a tuple that may contain None entries. Only carry the
+    # descriptions forward when every band actually has one.
+    if descriptions and all(d is not None for d in descriptions):
+        band_names: list[str] | None = [d for d in descriptions if d is not None]
+    else:
+        band_names = None
 
     dst_profile = build_rasterio_profile(src_profile, profile)
 
-    # Merge files
-    merge(
-        src_files,
-        method=method,
-        mem_limit=mem_limit_mb,
-        dst_path=dst_file,
-        dst_kwds=dst_profile,
-    )
+    # Prefer an S3 path (source or dst) so credentials are installed for the
+    # /vsis3/ read/write paths, honoring the module's transparent-S3 contract.
+    env_path: AnyPath = dst_file if dst_file.protocol == "s3" else src_paths[0]
 
-    _inject_band_metadata(dst_file, band_names=band_names)
+    try:
+        with _env_for_path(env_path):
+            merge(
+                [_to_gdal_uri(p) for p in src_paths],
+                method=method,
+                mem_limit=mem_limit_mb,
+                dst_path=_to_gdal_uri(dst_file),
+                dst_kwds=dst_profile,
+            )
+            _inject_band_metadata(dst_file, band_names=band_names)
+    except Exception as e:
+        msg = f"Failed to merge GeoTIFFs: {e}"
+        raise RuntimeError(msg) from e
 
     logger.info("Successfully merged into '%s'", dst_file.name)
 
@@ -541,13 +594,20 @@ def rewrite_tiff(
     profile: dict[str, Any] | None = None,
     band_names: list[str] | None = None,
     color_interp: list[ColorInterp] | None = None,
+    *,
+    move: bool = False,
 ) -> None:
     """Rewrite a GeoTIFF, optionally to a different storage backend.
 
-    Useful for applying compression/tiling, renaming bands, or moving files
+    Useful for applying compression/tiling, renaming bands, or copying files
     between local disk and S3. Source-side band descriptions, color
-    interpretation, NODATA, and tags are preserved automatically. The source
-    file is deleted on success when ``src_file != dst_file``.
+    interpretation, NODATA, and tags are preserved automatically.
+
+    The rewrite is always staged (a unique local sibling temp file, or an
+    in-memory image for S3 destinations) and only swapped into place after the
+    full copy and metadata injection succeed. A pre-existing destination is
+    therefore left untouched on any failure, and the source is only deleted
+    when ``move=True`` (and never when it fails).
 
     Parameters
     ----------
@@ -555,7 +615,7 @@ def rewrite_tiff(
         Source GeoTIFF (local or S3).
     dst_file : str | Path | UPath
         Destination GeoTIFF (local or S3). May be the same as ``src_file``,
-        in which case the file is rewritten in place via a sibling temp file.
+        in which case the file is rewritten in place via the staging file.
     profile : dict[str, Any] or None, optional
         Custom rasterio profile settings. If None, uses deflate compression
         with 512x512 tiling.
@@ -565,6 +625,10 @@ def rewrite_tiff(
     color_interp : list[ColorInterp] or None, optional
         New per-band color interpretation. If None, the source's existing
         color interpretation is preserved.
+    move : bool, default False
+        If ``True``, delete ``src_file`` after a successful rewrite to a
+        different path (a move). If ``False`` (the default), the source is
+        preserved (a copy). Ignored when ``src_file == dst_file``.
 
     Raises
     ------
@@ -589,53 +653,93 @@ def rewrite_tiff(
         for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
             dst_profile.pop(_k, None)
 
+    # A single GDAL environment can only carry one set of S3 credentials, so a
+    # source and destination on different S3 backends can't both be authorized
+    # in one call. Fail loudly rather than silently signing with the wrong keys.
+    if (
+        src_file.protocol == "s3"
+        and dst_file.protocol == "s3"
+        and src_file.storage_options != dst_file.storage_options
+    ):
+        msg = (
+            "rewrite_tiff cannot bridge two S3 backends with different "
+            "credentials/endpoints in a single call; stage via a local file instead."
+        )
+        raise NotImplementedError(msg)
+
     # Prefer an S3 path (source or dst) so AWS credentials are installed.
     env_path: AnyPath = src_file if src_file.protocol == "s3" else dst_file
-    # GDAL CreateCopy can't read and write the same file at once. On S3, a
-    # sibling temp *object* plus an fsspec rename hits stale-listing errors,
-    # because GDAL's own S3 writes never touch s3fs's directory cache -- so
-    # stage in memory instead and overwrite the key directly. Locally, a
-    # sibling temp file plus an os.rename is simpler and doesn't have that
-    # problem, so keep using it there.
-    in_place_via_memory = in_place and dst_file.protocol == "s3"
-    local_in_place = in_place and not in_place_via_memory
-    work_dst = dst_file.with_name(f".{dst_file.name}.tmp") if local_in_place else dst_file
 
+    stage = _rewrite_via_memory if dst_file.protocol == "s3" else _rewrite_via_tempfile
     try:
         with _env_for_path(env_path):
-            if in_place_via_memory:
-                with MemoryFile() as memfile:
-                    rasterio.shutil.copy(_to_gdal_uri(src_file), memfile.name, driver="GTiff")
-                    _inject_band_metadata(
-                        memfile.name,
-                        band_names=band_names,
-                        color_interp=color_interp,
-                    )
-                    rasterio.shutil.copy(
-                        memfile.name,
-                        _to_gdal_uri(dst_file),
-                        driver=driver,
-                        **dst_profile,
-                    )
-            else:
-                rasterio.shutil.copy(
-                    _to_gdal_uri(src_file),
-                    _to_gdal_uri(work_dst),
-                    driver=driver,
-                    **dst_profile,
-                )
-                _inject_band_metadata(work_dst, band_names=band_names, color_interp=color_interp)
-        if local_in_place:
-            work_dst.rename(dst_file)
-        elif not in_place and src_file != dst_file:
-            src_file.unlink()
+            stage(
+                src_file,
+                dst_file,
+                driver,
+                dst_profile,
+                band_names,
+                color_interp,
+            )
     except Exception as e:
-        if not in_place_via_memory:
-            work_dst.unlink(missing_ok=True)
         msg = f"Failed to rewrite GeoTIFF: {e}"
         raise RuntimeError(msg) from e
 
+    if move and not in_place:
+        src_file.unlink()
+
     logger.debug("Rewrote GeoTIFF from '%s' to '%s'", src_file.name, dst_file.name)
+
+
+def _rewrite_via_memory(
+    src_file: UPath,
+    dst_file: UPath,
+    driver: str,
+    dst_profile: dict[str, Any],
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+) -> None:
+    """Stage a rewrite entirely in memory, then atomically PutObject to S3.
+
+    GDAL CreateCopy can't read and write the same file at once, and on S3 a
+    sibling temp object plus an fsspec rename hits stale-listing errors because
+    GDAL's own S3 writes never touch s3fs's directory cache. Staging in memory
+    and writing the key in one shot sidesteps both: a failure never touches an
+    existing destination object (PutObject is atomic per key).
+    """
+    with MemoryFile() as memfile:
+        rasterio.shutil.copy(_to_gdal_uri(src_file), memfile.name, driver="GTiff")
+        _inject_band_metadata(memfile.name, band_names=band_names, color_interp=color_interp)
+        rasterio.shutil.copy(memfile.name, _to_gdal_uri(dst_file), driver=driver, **dst_profile)
+
+
+def _rewrite_via_tempfile(
+    src_file: UPath,
+    dst_file: UPath,
+    driver: str,
+    dst_profile: dict[str, Any],
+    band_names: list[str] | None,
+    color_interp: list[ColorInterp] | None,
+) -> None:
+    """Stage a local rewrite to a unique sibling temp, then atomically replace.
+
+    The unique suffix avoids collisions between concurrent writers, and the
+    destination is only replaced after the copy and metadata injection both
+    succeed, so a pre-existing destination survives any failure.
+    """
+    work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
+    try:
+        rasterio.shutil.copy(
+            _to_gdal_uri(src_file),
+            _to_gdal_uri(work_dst),
+            driver=driver,
+            **dst_profile,
+        )
+        _inject_band_metadata(work_dst, band_names=band_names, color_interp=color_interp)
+        work_dst.replace(dst_file)
+    except BaseException:
+        work_dst.unlink(missing_ok=True)
+        raise
 
 
 def write_cog(
@@ -681,7 +785,7 @@ def write_cog(
     # temp file and swap in with an atomic rename, so a resumed run can't
     # mistake a partially-written file for a finished one.
     is_s3 = dst_file.protocol == "s3"
-    work_dst = dst_file if is_s3 else dst_file.with_name(f".{dst_file.name}.tmp")
+    work_dst = dst_file if is_s3 else dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
 
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)  # staging file is always GTiff
@@ -703,7 +807,7 @@ def write_cog(
                 rasterio.shutil.copy(memfile.name, _to_gdal_uri(work_dst), **COG_PROFILE)
 
         if not is_s3:
-            work_dst.rename(dst_file)
+            work_dst.replace(dst_file)
     except Exception as e:
         if not is_s3:
             work_dst.unlink(missing_ok=True)
