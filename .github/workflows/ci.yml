@@ -52,26 +52,23 @@ jobs:
           pytest -q --cov=freezecore --cov-branch --cov-report=term-missing
 
   test-lowest:
-    # Verifies the declared *runtime* dependency lower bounds actually install
-    # and pass on the minimum supported Python (3.12). Only the project's deps
-    # are pinned to their floors (`--resolution lowest-direct`); the test
-    # toolchain is installed at normal versions so it isn't dragged to ancient
-    # releases too.
+    # Verifies the declared dependency lower bounds actually install and pass on
+    # the minimum supported Python (3.12). `--resolution lowest-direct` pins
+    # every direct dependency (runtime, extras, and dev tools) to its floor, so
+    # the dev group carries lower bounds too (see [dependency-groups] in
+    # pyproject.toml).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - name: Install runtime deps at their lower bounds
-        run: |
-          uv venv --python 3.12
-          uv pip install --resolution lowest-direct ".[s3]"
-          uv pip install pytest pytest-cov
+      - name: Sync dependencies at their lower bounds
+        run: uv sync --all-extras --resolution lowest-direct --python 3.12
       - name: Run tests
-        # Invoke the venv's pytest directly; `uv run` would ignore this .venv
-        # and build a fresh (latest-Python) environment without pytest.
-        run: .venv/bin/pytest -q
+        # --no-sync keeps `uv run` from re-resolving the environment back to the
+        # latest versions before running.
+        run: uv run --no-sync pytest -q
 
   test-s3:
     # Exercises the credentialed S3 read/write paths (`_s3_env`) against a real

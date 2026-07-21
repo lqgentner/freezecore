@@ -67,14 +67,17 @@ Issues = "https://github.com/lqgentner/freezecore/issues"
 Changelog = "https://github.com/lqgentner/freezecore/blob/main/CHANGELOG.md"
 
 [dependency-groups]
+# Dev tools carry lower bounds too, so `uv sync --resolution lowest-direct`
+# (used by the lowest-bound CI job) resolves a working toolchain instead of
+# dragging e.g. pytest down to an ancient, uninstallable release.
 dev = [
-    "mypy",
-    "pandas-stubs",
-    "pytest",
-    "pytest-cov",
-    "ruff",
-    "types-geopandas",
-    "types-requests",
+    "mypy>=1.11",
+    "pandas-stubs>=2.2",
+    "pytest>=8.2",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "types-geopandas>=1.0",
+    "types-requests>=2.31",
 ]
 
 [build-system]

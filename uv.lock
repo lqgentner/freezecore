@@ -494,13 +494,13 @@ provides-extras = ["s3"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "mypy" },
-    { name = "pandas-stubs" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-    { name = "types-geopandas" },
-    { name = "types-requests" },
+    { name = "mypy", specifier = ">=1.11" },
+    { name = "pandas-stubs", specifier = ">=2.2" },
+    { name = "pytest", specifier = ">=8.2" },
+    { name = "pytest-cov", specifier = ">=5.0" },
+    { name = "ruff", specifier = ">=0.6" },
+    { name = "types-geopandas", specifier = ">=1.0" },
+    { name = "types-requests", specifier = ">=2.31" },
 ]
 
 [[package]]
