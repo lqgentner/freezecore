@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - name: mypy
+        run: uv run mypy src/freezecore
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Run tests with coverage
+        run: >
+          uv run --python ${{ matrix.python-version }} --all-extras
+          pytest -q --cov=freezecore --cov-branch --cov-report=term-missing
+
+  test-lowest:
+    # Verifies the declared *runtime* dependency lower bounds actually install
+    # and pass on the minimum supported Python (3.12). Only the project's deps
+    # are pinned to their floors (`--resolution lowest-direct`); the test
+    # toolchain is installed at normal versions so it isn't dragged to ancient
+    # releases too.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Install runtime deps at their lower bounds
+        run: |
+          uv venv --python 3.12
+          uv pip install --resolution lowest-direct ".[s3]"
+          uv pip install pytest pytest-cov
+      - name: Run tests
+        run: uv run --no-project pytest -q
+
+  test-s3:
+    # Exercises the credentialed S3 read/write paths (`_s3_env`) against a real
+    # MinIO server -- the object-store code unit tests can't reach.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=testkey -e MINIO_ROOT_PASSWORD=testsecret \
+            minio/minio server /data
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            sleep 1
+          done
+      - name: Run S3 integration tests
+        env:
+          FREEZECORE_TEST_S3_ENDPOINT: http://localhost:9000
+          FREEZECORE_TEST_S3_KEY: testkey
+          FREEZECORE_TEST_S3_SECRET: testsecret
+        run: uv run --all-extras pytest -q -m integration
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version from git tags/history.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Check metadata
+        run: uvx twine check dist/*
+      - name: Smoke-test base wheel in a clean environment
+        run: |
+          uv venv /tmp/base
+          uv pip install --python /tmp/base "$(ls dist/*.whl)"
+          uv run --python /tmp/base --no-project python -c "import freezecore; from freezecore import mgrs, raster, vrt, download, vectools; print('base import OK')"
+      - name: Smoke-test [s3] wheel in a clean environment
+        run: |
+          uv venv /tmp/s3
+          uv pip install --python /tmp/s3 "$(ls dist/*.whl)[s3]"
+          uv run --python /tmp/s3 --no-project python -c "import freezecore.s3; print('s3 import OK')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
