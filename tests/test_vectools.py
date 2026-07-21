@@ -76,6 +76,13 @@ class TestSaveAndReadParquet:
             assert Path(out_path).exists()
             assert sample_gdf.equals(result_gdf)
 
+    def test_no_leftover_staging_file(self, sample_gdf: gpd.GeoDataFrame) -> None:
+        """The atomic staging temp file must not remain after a successful write."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_path = Path(temp_dir) / "test.parquet"
+            save_and_read_parquet(sample_gdf, out_path)
+            assert not list(Path(temp_dir).glob(".*.tmp"))
+
 
 class TestIsZAxisZeros:
     """Test is_z_axis_zero function."""
@@ -138,6 +145,40 @@ class TestDropZIfZero:
 
         with pytest.raises(ValueError, match="Geometry has no Z axis"):
             is_z_axis_zero(sample_gdf)
+
+
+class TestZInteriorRings:
+    """Interior-ring Z coordinates must not be silently discarded (FC-06)."""
+
+    def test_polygon_hole_z_is_inspected(self) -> None:
+        shell = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0), (0, 0, 0)]
+        hole = [(2, 2, 5), (4, 2, 5), (4, 4, 5), (2, 4, 5), (2, 2, 5)]
+        poly = shapely.Polygon(shell, [hole])
+        gdf = gpd.GeoDataFrame({"geometry": [poly]}, crs="EPSG:4326")
+
+        # Exterior Z is all zero, but the hole carries a real Z value.
+        assert is_z_axis_zero(gdf) is False
+
+        result = drop_z_if_zero(gdf)
+        assert result.has_z.all()  # meaningful Z must be preserved
+
+    def test_multipolygon_hole_z_is_inspected(self) -> None:
+        shell = [(0, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0), (0, 0, 0)]
+        hole = [(2, 2, 7), (4, 2, 7), (4, 4, 7), (2, 4, 7), (2, 2, 7)]
+        poly = shapely.Polygon(shell, [hole])
+        gdf = gpd.GeoDataFrame({"geometry": [shapely.MultiPolygon([poly])]}, crs="EPSG:4326")
+
+        assert is_z_axis_zero(gdf) is False
+
+    def test_mixed_dimensional_collection_does_not_raise(self) -> None:
+        # A collection mixing a 2D point with a 3D line must not abort the
+        # traversal; only the members with Z contribute.
+        point_2d = shapely.Point(1, 2)
+        line_3d = shapely.LineString([(0, 0, 3), (1, 1, 3)])
+        coll = shapely.GeometryCollection([point_2d, line_3d])
+        gdf = gpd.GeoDataFrame({"geometry": [coll]}, crs="EPSG:4326")
+
+        assert is_z_axis_zero(gdf) is False
 
 
 def test_simplify_multipolygons() -> None:

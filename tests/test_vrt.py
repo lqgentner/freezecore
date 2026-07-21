@@ -128,6 +128,61 @@ class TestRgbVrt:
         assert [b.findtext("Description") for b in bands] == ["VV_dB", "VH_dB", "VV_dB-VH_dB"]
         assert bands[2].findtext("PixelFunctionType") == "diff"
 
+    def test_rejects_mismatched_dimensions(self, vv_tiff: Path, tmp_path: Path) -> None:
+        vh_path = tmp_path / "vh_big.tif"
+        with rasterio.open(
+            vh_path,
+            "w",
+            driver="GTiff",
+            width=WIDTH + 1,
+            height=HEIGHT,
+            count=1,
+            dtype="float32",
+            crs="EPSG:32632",
+            transform=from_origin(500000, 5200000, 10, 10),
+            nodata=np.nan,
+        ) as dst:
+            dst.write(np.zeros((HEIGHT, WIDTH + 1), dtype=np.float32), 1)
+
+        with pytest.raises(ValueError, match="same size"):
+            create_rgb_vrt(vv_tiff, vh_path, tmp_path / "rgb.vrt")
+
+    def test_rejects_mismatched_crs(self, vv_tiff: Path, tmp_path: Path) -> None:
+        vh_path = tmp_path / "vh_crs.tif"
+        make_tiff(vh_path)
+        with rasterio.open(
+            vh_path,
+            "w",
+            driver="GTiff",
+            width=WIDTH,
+            height=HEIGHT,
+            count=1,
+            dtype="float32",
+            crs="EPSG:32633",
+            transform=from_origin(500000, 5200000, 10, 10),
+            nodata=np.nan,
+        ) as dst:
+            dst.write(np.zeros((HEIGHT, WIDTH), dtype=np.float32), 1)
+
+        with pytest.raises(ValueError, match="CRS"):
+            create_rgb_vrt(vv_tiff, vh_path, tmp_path / "rgb.vrt")
+
+
+class TestVrtXmlSafety:
+    def test_special_characters_in_filename_produce_valid_xml(self, tmp_path: Path) -> None:
+        # A literal '&' in the filename would break naive string interpolation.
+        src = tmp_path / "a&b<test>.tif"
+        make_tiff(src)
+        vrt_path = tmp_path / "db.vrt"
+
+        create_decibel_vrt(src, vrt_path)
+
+        # Must parse as well-formed XML with the exact (unescaped) filename.
+        root = ET.parse(vrt_path).getroot()  # noqa: S314 -- parsing our own just-written fixture
+        source = root.find("VRTRasterBand/SimpleSource/SourceFilename")
+        assert source is not None
+        assert source.text == "a&b<test>.tif"
+
 
 class TestBuildVrtMosaic:
     def test_mosaics_two_adjacent_tiles(self, tmp_path: Path) -> None:
@@ -188,4 +243,67 @@ class TestBuildVrtMosaic:
             dst.write(np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32), 1)
 
         with pytest.raises(ValueError, match="pixel size"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_mismatched_crs(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, fill=1.0)
+        with rasterio.open(
+            tile_b,
+            "w",
+            driver="GTiff",
+            width=WIDTH,
+            height=HEIGHT,
+            count=1,
+            dtype="float32",
+            crs="EPSG:32633",
+            transform=from_origin(500000 + WIDTH * 10, 5200000, 10, 10),
+            nodata=np.nan,
+        ) as dst:
+            dst.write(np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32), 1)
+
+        with pytest.raises(ValueError, match="CRS"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_mismatched_dtype(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, fill=1.0)
+        with rasterio.open(
+            tile_b,
+            "w",
+            driver="GTiff",
+            width=WIDTH,
+            height=HEIGHT,
+            count=1,
+            dtype="int16",
+            crs="EPSG:32632",
+            transform=from_origin(500000 + WIDTH * 10, 5200000, 10, 10),
+            nodata=0,
+        ) as dst:
+            dst.write(np.full((HEIGHT, WIDTH), 2, dtype=np.int16), 1)
+
+        with pytest.raises(ValueError, match="dtype"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_tile_outside_vrt_directory(self, tmp_path: Path) -> None:
+        other = tmp_path / "other"
+        other.mkdir()
+        tile_a = tmp_path / "a.tif"
+        tile_b = other / "b.tif"
+        make_tiff(tile_a, fill=1.0)
+        make_tiff(tile_b, origin=(500000 + WIDTH * 10, 5200000), fill=2.0)
+
+        with pytest.raises(ValueError, match="same"):
+            build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
+
+    def test_rejects_off_grid_tile(self, tmp_path: Path) -> None:
+        tile_a = tmp_path / "a.tif"
+        tile_b = tmp_path / "b.tif"
+        make_tiff(tile_a, origin=(500000, 5200000), fill=1.0)
+        # Shift by half a pixel so the tile does not fall on the common grid.
+        make_tiff(tile_b, origin=(500000 + WIDTH * 10 + 5, 5200000), fill=2.0)
+
+        with pytest.raises(ValueError, match="aligned"):
             build_vrt_mosaic([tile_a, tile_b], tmp_path / "mosaic.vrt")
