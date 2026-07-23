@@ -6,7 +6,7 @@ and rewriting GeoTIFF files on local disk or S3-compatible object storage.
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager
 import logging
 from pathlib import Path
 from secrets import token_hex
@@ -18,14 +18,13 @@ import rasterio
 import rasterio.env
 from rasterio.io import MemoryFile
 from rasterio.merge import merge
-import rasterio.session
 import rasterio.shutil
 from upath import UPath
 
-from freezecore.download import TRANSIENT_HTTP_STATUS_CODES
+from freezecore.s3 import s3_env
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Generator, Sequence
 
     import numpy as np
     from rasterio.enums import ColorInterp
@@ -54,99 +53,13 @@ COG_PROFILE: dict[str, Any] = {
 """Creation profile for the GDAL ``COG`` driver, used by :func:`write_cog` and by
 callers rewriting existing files to COG via :func:`rewrite_tiff`."""
 
-# Shared transient codes, plus 403 (S3 can return this transiently)
-GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_HTTP_STATUS_CODES}))
-GDAL_HTTP_MAX_RETRY = 5
-GDAL_HTTP_RETRY_DELAY_S = 1
-
 
 @contextmanager
-def _s3_env(path: UPath) -> Iterator[None]:
-    """Set up GDAL and rasterio environments for S3-compatible object storage.
-
-    Extracts credentials and endpoint configuration from the fsspec storage
-    options attached to ``path`` and applies them to rasterio (bundled GDAL)
-    for the duration of the ``with`` block. When the optional ``osgeo``
-    bindings are installed, the same configuration is mirrored into the
-    system GDAL so that raw ``gdal.*`` I/O paths see it too; rasterio-only
-    consumers work without ``osgeo``.
-
-    Parameters
-    ----------
-    path : UPath
-        A UPath with ``protocol="s3"`` whose ``storage_options`` carry
-        fsspec/s3fs credentials (``key``, ``secret``, ``token``) and
-        optionally a custom ``endpoint_url``.
-    """
-    import boto3  # noqa: PLC0415
-
-    try:
-        from osgeo import gdal  # noqa: PLC0415
-    except ImportError:
-        gdal = None
-
-    storage_options = path.storage_options
-    boto3_session = boto3.Session(
-        aws_access_key_id=storage_options.get("key"),
-        aws_secret_access_key=storage_options.get("secret"),
-        aws_session_token=storage_options.get("token"),
-        region_name=storage_options.get("region_name"),
-    )
-    # boto3 returns None when no credentials are configured (env, profile, or
-    # instance metadata). Guard against that so anonymous access to a public
-    # bucket falls back to unsigned requests instead of raising AttributeError.
-    raw_credentials = boto3_session.get_credentials()
-    credentials = raw_credentials.get_frozen_credentials() if raw_credentials is not None else None
-
-    non_aws_options: dict[str, str] = {
-        # /vsis3/ has no native random-write support.
-        "CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE": "YES",
-        # Retry transient HTTP failures on the /vsis3 read/write path
-        "GDAL_HTTP_MAX_RETRY": str(GDAL_HTTP_MAX_RETRY),
-        "GDAL_HTTP_RETRY_DELAY": str(GDAL_HTTP_RETRY_DELAY_S),
-        "GDAL_HTTP_RETRY_CODES": GDAL_HTTP_RETRY_CODES,
-        # Don't probe for sidecar files on open
-        "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
-    }
-    aws_options: dict[str, str] = {}
-    if credentials is not None:
-        aws_options["AWS_ACCESS_KEY_ID"] = credentials.access_key
-        aws_options["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
-        if credentials.token:
-            aws_options["AWS_SESSION_TOKEN"] = credentials.token
-    else:
-        # No credentials: sign nothing, allowing public-bucket reads.
-        non_aws_options["AWS_NO_SIGN_REQUEST"] = "YES"
-    if region := boto3_session.region_name:
-        aws_options["AWS_REGION"] = region
-    if endpoint_url := storage_options.get("endpoint_url"):
-        host = endpoint_url.removeprefix("https://").removeprefix("http://")
-        non_aws_options["AWS_S3_ENDPOINT"] = host
-        non_aws_options["AWS_VIRTUAL_HOSTING"] = "FALSE"
-        if endpoint_url.startswith("http://"):
-            non_aws_options["AWS_HTTPS"] = "NO"
-
-    rio_session = (
-        rasterio.session.AWSSession(boto3_session)
-        if credentials is not None
-        else rasterio.session.AWSSession(aws_unsigned=True)
-    )
-    rio_env = rasterio.env.Env(session=rio_session, **non_aws_options)
-    gdal_env = (
-        gdal.config_options({**non_aws_options, **aws_options})
-        if gdal is not None
-        else nullcontext()
-    )
-    with rio_env, gdal_env:
-        yield
-
-
-@contextmanager
-def _env_for_path(path: AnyPath) -> Iterator[None]:
-    """Enter the appropriate GDAL/rasterio environment for a path's storage backend.
+def _env_for_path(path: AnyPath) -> Generator[None]:
+    """Enter the appropriate rasterio environment for a path's storage backend.
 
     Local paths get a plain ``Env``; S3 ``UPath`` instances get a credentialed
-    env via :func:`_s3_env`.
+    env via :func:`freezecore.s3.s3_env`.
 
     Raises
     ------
@@ -159,15 +72,20 @@ def _env_for_path(path: AnyPath) -> Iterator[None]:
             with rasterio.env.Env():
                 yield
         case "s3":
-            with _s3_env(path):
+            with s3_env(path):
                 yield
         case p:
             msg = f"Unsupported protocol '{p}'."
             raise ValueError(msg)
 
 
-def _to_gdal_uri(path: AnyPath) -> str:
-    """Convert a path to a GDAL-readable URI, using ``/vsis3/`` for S3.
+def _to_vsi_uri(path: AnyPath) -> str:
+    """Convert a path to a GDAL VSI URI, using ``/vsis3/`` for S3.
+
+    ``rasterio.open`` and ``rasterio.merge.merge`` parse ``s3://`` URIs
+    themselves, but ``rasterio.shutil.copy`` passes its arguments to GDAL
+    verbatim and only understands the ``/vsis3/`` form, so its S3 operands must
+    go through this helper.
 
     Raises
     ------
@@ -190,7 +108,7 @@ def _rasterio_open(
     path: AnyPath,
     mode: Literal["r", "r+", "w", "w+"] = "r",
     **kwargs,
-) -> Iterator[DatasetReader | DatasetWriter]:
+) -> Generator[DatasetReader | DatasetWriter]:
     """Yield a rasterio dataset, configuring a GDAL env for S3 if needed.
 
     Internal generator backing the public :func:`rasterio_open` dispatcher.
@@ -574,10 +492,10 @@ def merge_tiffs(
     try:
         with _env_for_path(env_path):
             merge(
-                [_to_gdal_uri(p) for p in src_paths],
+                [str(p) for p in src_paths],
                 method=method,
                 mem_limit=mem_limit_mb,
-                dst_path=_to_gdal_uri(dst_file),
+                dst_path=str(dst_file),
                 dst_kwds=dst_profile,
             )
             _inject_band_metadata(dst_file, band_names=band_names)
@@ -600,7 +518,8 @@ def rewrite_tiff(
     """Rewrite a GeoTIFF, optionally to a different storage backend.
 
     Useful for applying compression/tiling, renaming bands, or copying files
-    between local disk and S3. Source-side band descriptions, color
+    between local disk and S3, or between two different S3 backends (each side's
+    credentials are applied independently). Source-side band descriptions, color
     interpretation, NODATA, and tags are preserved automatically.
 
     The rewrite is always staged (a unique local sibling temp file, or an
@@ -653,34 +572,19 @@ def rewrite_tiff(
         for _k in ("tiled", "blockxsize", "blockysize", "interleave"):
             dst_profile.pop(_k, None)
 
-    # A single GDAL environment can only carry one set of S3 credentials, so a
-    # source and destination on different S3 backends can't both be authorized
-    # in one call. Fail loudly rather than silently signing with the wrong keys.
-    if (
-        src_file.protocol == "s3"
-        and dst_file.protocol == "s3"
-        and src_file.storage_options != dst_file.storage_options
-    ):
-        msg = (
-            "rewrite_tiff cannot bridge two S3 backends with different "
-            "credentials/endpoints in a single call; stage via a local file instead."
-        )
-        raise NotImplementedError(msg)
-
-    # Prefer an S3 path (source or dst) so AWS credentials are installed.
-    env_path: AnyPath = src_file if src_file.protocol == "s3" else dst_file
-
+    # Each stage installs the source-read and destination-write credentials
+    # independently (see the stage helpers), so src and dst may live on
+    # different S3 backends.
     stage = _rewrite_via_memory if dst_file.protocol == "s3" else _rewrite_via_tempfile
     try:
-        with _env_for_path(env_path):
-            stage(
-                src_file,
-                dst_file,
-                driver,
-                dst_profile,
-                band_names,
-                color_interp,
-            )
+        stage(
+            src_file,
+            dst_file,
+            driver,
+            dst_profile,
+            band_names,
+            color_interp,
+        )
     except Exception as e:
         msg = f"Failed to rewrite GeoTIFF: {e}"
         raise RuntimeError(msg) from e
@@ -706,11 +610,17 @@ def _rewrite_via_memory(
     GDAL's own S3 writes never touch s3fs's directory cache. Staging in memory
     and writing the key in one shot sidesteps both: a failure never touches an
     existing destination object (PutObject is atomic per key).
+
+    The read and write are separate copies bridged by the in-memory image, so
+    each runs under its own credentialed env; ``src_file`` and ``dst_file`` may
+    therefore sit on different S3 backends.
     """
     with MemoryFile() as memfile:
-        rasterio.shutil.copy(_to_gdal_uri(src_file), memfile.name, driver="GTiff")
+        with _env_for_path(src_file):
+            rasterio.shutil.copy(_to_vsi_uri(src_file), memfile.name, driver="GTiff")
         _inject_band_metadata(memfile.name, band_names=band_names, color_interp=color_interp)
-        rasterio.shutil.copy(memfile.name, _to_gdal_uri(dst_file), driver=driver, **dst_profile)
+        with _env_for_path(dst_file):
+            rasterio.shutil.copy(memfile.name, _to_vsi_uri(dst_file), driver=driver, **dst_profile)
 
 
 def _rewrite_via_tempfile(
@@ -725,16 +635,18 @@ def _rewrite_via_tempfile(
 
     The unique suffix avoids collisions between concurrent writers, and the
     destination is only replaced after the copy and metadata injection both
-    succeed, so a pre-existing destination survives any failure.
+    succeed, so a pre-existing destination survives any failure. The
+    destination is always local here, so only the source read needs credentials.
     """
     work_dst = dst_file.with_name(f".{dst_file.name}.{token_hex(8)}.tmp")
     try:
-        rasterio.shutil.copy(
-            _to_gdal_uri(src_file),
-            _to_gdal_uri(work_dst),
-            driver=driver,
-            **dst_profile,
-        )
+        with _env_for_path(src_file):
+            rasterio.shutil.copy(
+                _to_vsi_uri(src_file),
+                _to_vsi_uri(work_dst),
+                driver=driver,
+                **dst_profile,
+            )
         _inject_band_metadata(work_dst, band_names=band_names, color_interp=color_interp)
         work_dst.replace(dst_file)
     except BaseException:
@@ -804,7 +716,7 @@ def write_cog(
                     mem_ds.colorinterp = color_interp
 
             with _env_for_path(dst_file):
-                rasterio.shutil.copy(memfile.name, _to_gdal_uri(work_dst), **COG_PROFILE)
+                rasterio.shutil.copy(memfile.name, _to_vsi_uri(work_dst), **COG_PROFILE)
 
         if not is_s3:
             work_dst.replace(dst_file)
