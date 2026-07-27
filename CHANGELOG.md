@@ -51,6 +51,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   now rejects unsafe/inferred filenames that would escape the destination.
 - S3 transient-retry codes narrowed so a permanent `AccessDenied`/403 is no
   longer retried.
+- `COG_PROFILE` now sets `OVERVIEW_RESAMPLING=AVERAGE` (GDAL defaults to
+  `CUBIC`, which propagates NODATA into overview pyramids) and
+  `PREDICTOR=YES`/`PREDICTOR_OVERVIEW=YES`, which shrinks float32 rasters by
+  ~10-15% at unchanged write cost.
 
 ### Fixed
 
