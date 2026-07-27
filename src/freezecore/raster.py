@@ -49,9 +49,26 @@ COG_PROFILE: dict[str, Any] = {
     "compress": "deflate",
     "blocksize": 512,
     "overviews": "IGNORE_EXISTING",
+    # AVERAGE skips NODATA pixels, unlike GDAL's default CUBIC
+    "overview_resampling": "AVERAGE",
+    # YES resolves to standard predictor (predictor=2) for integer data type
+    # and floating-point predictor (predictor=3) for floating point data type
+    "predictor": "YES",
+    "overview_predictor": "YES",
 }
 """Creation profile for the GDAL ``COG`` driver, used by :func:`write_cog` and by
 callers rewriting existing files to COG via :func:`rewrite_tiff`."""
+
+_COG_CREATION_OPTIONS = (
+    "blocksize",
+    "overviews",
+    "overview_resampling",
+    "overview_predictor",
+    "overview_compress",
+    # GTiff rejects the COG driver's YES/NO/STANDARD
+    "predictor",
+)
+"""COG-driver creation options the GTiff driver rejects or does not know."""
 
 
 @contextmanager
@@ -701,6 +718,10 @@ def write_cog(
 
     mem_profile = build_rasterio_profile(profile)
     mem_profile.pop("driver", None)  # staging file is always GTiff
+    # COG-driver-only options are rejected or ignored by GTiff, and the final
+    # COG creation options come from COG_PROFILE below regardless.
+    for key in _COG_CREATION_OPTIONS:
+        mem_profile.pop(key, None)
 
     try:
         with MemoryFile() as memfile:
