@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
-## [Unreleased]
+## [0.1.0] - 2026-07-27
 
 ### Added
 
@@ -20,9 +20,21 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   wheel smoke-test) and a Trusted-Publishing release workflow.
 - S3 integration tests (`tests/test_s3_integration.py`, `integration` marker),
   skipped unless `FREEZECORE_TEST_S3_*` is set.
+- `freezecore.s3.s3_env`, a rasterio context manager that configures
+  credentials and endpoint for S3-compatible object storage from a `UPath`'s
+  storage options. Usable with `rasterio` or `rioxarray`.
+- `rewrite_tiff` can now copy between two different S3 backends (e.g. an
+  unsigned public bucket to a private one); the source read and destination
+  write each apply their own credentials, so the previous same-backend
+  restriction is gone.
 
 ### Changed
 
+- **Breaking:** `make_s3_upath` renamed its first parameter `root` → `path` and
+  gained optional `token` and `region`; `key`/`secret` are now optional so it
+  can build paths for anonymous (unsigned) access to public buckets.
+- S3 rasterio setup consolidated into `freezecore.s3` and is now rasterio-only:
+  the optional GDAL helper were removed
 - Dependency lower bounds corrected to the oldest versions that actually
   install and work on Python 3.12: notably `numpy>=2.0` (code uses `np.concat`),
   `shapely>=2.1.0` (`transform(interleaved=...)`), `pyarrow>=17.0` (NumPy 2 ABI),
@@ -30,9 +42,6 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   (`set_custom_error_handler`).
 - Licensing metadata modernized to PEP 639 (`license = "MIT"` +
   `license-files`), and the sdist no longer ships `.python-version`/`uv.lock`.
-
-### Changed
-
 - **Breaking:** `GeoVectorData.remove()` is renamed to `cleanup()` and now
   defaults to removing only the raw download (`raw=True, processed=False`),
   keeping the processed data.
@@ -42,6 +51,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   now rejects unsafe/inferred filenames that would escape the destination.
 - S3 transient-retry codes narrowed so a permanent `AccessDenied`/403 is no
   longer retried.
+- `COG_PROFILE` now sets `OVERVIEW_RESAMPLING=AVERAGE` (GDAL defaults to
+  `CUBIC`, which propagates NODATA into overview pyramids) and
+  `PREDICTOR=YES`/`PREDICTOR_OVERVIEW=YES`, which shrinks float32 rasters by
+  ~10-15% at unchanged write cost.
 
 ### Fixed
 

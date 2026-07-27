@@ -1,7 +1,7 @@
 """S3 integration tests against a live S3-compatible service (e.g. MinIO).
 
-These exercise the credentialed ``_s3_env`` read/write paths in
-``freezecore.raster`` that unit tests can't reach. They are skipped unless the
+These exercise the credentialed :func:`freezecore.s3.s3_env` read/write paths
+used by ``freezecore.raster`` that unit tests can't reach. They are skipped unless the
 ``FREEZECORE_TEST_S3_*`` environment variables point at a reachable endpoint;
 CI provides them via a MinIO service container.
 
@@ -84,6 +84,14 @@ def s3_key(bucket_root: UPath) -> Iterator[UPath]:
     path.unlink(missing_ok=True)
 
 
+@pytest.fixture
+def s3_key2(bucket_root: UPath) -> Iterator[UPath]:
+    """Yield a second unique object path inside the bucket, cleaned up afterwards."""
+    path = bucket_root / f"{uuid.uuid4().hex}.tif"
+    yield path
+    path.unlink(missing_ok=True)
+
+
 class TestWriteCogS3:
     def test_round_trip(self, s3_key: UPath) -> None:
         data = np.full((HEIGHT, WIDTH), 3.0, dtype=np.float32)
@@ -119,3 +127,18 @@ class TestRewriteTiffS3:
 
         assert not src.exists()
         assert s3_key.exists()
+
+    def test_s3_to_s3_copy(self, s3_key: UPath, s3_key2: UPath) -> None:
+        # Exercises the in-memory stage reading *from* S3 and writing back to
+        # S3, with the source-read and destination-write each entering their own
+        # credentialed env.
+        data = np.full((HEIGHT, WIDTH), 4.0, dtype=np.float32)
+        write_cog(data, s3_key, _PROFILE, band_names=["VH"])
+
+        rewrite_tiff(s3_key, s3_key2, profile=COG_PROFILE)
+
+        assert s3_key.exists()  # copy by default -- source preserved
+        assert s3_key2.exists()
+        with rasterio_open(s3_key2) as ds:
+            assert ds.descriptions == ("VH",)
+            assert np.array_equal(ds.read(1), data)
