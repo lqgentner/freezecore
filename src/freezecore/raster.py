@@ -21,8 +21,6 @@ from rasterio.merge import merge
 import rasterio.shutil
 from upath import UPath
 
-from freezecore.s3 import s3_env
-
 if TYPE_CHECKING:
     from collections.abc import Generator, Sequence
 
@@ -89,6 +87,9 @@ def _env_for_path(path: AnyPath) -> Generator[None]:
             with rasterio.env.Env():
                 yield
         case "s3":
+            # Lazy import: keeps botocore/s3fs (the `[s3]` extra) out of the base import.
+            from freezecore.s3 import s3_env  # noqa: PLC0415
+
             with s3_env(path):
                 yield
         case p:
