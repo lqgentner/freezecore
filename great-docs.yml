@@ -1,0 +1,136 @@
+# Great Docs Configuration
+# See https://posit-dev.github.io/great-docs/user-guide/configuration.html
+
+display_name: freezecore
+
+# Docstring Parser
+# ----------------
+# The codebase is numpydoc throughout (enforced by ruff's pydocstyle
+# convention = "numpy" in pyproject.toml).
+parser: numpy
+
+# Dynamic Introspection
+# ---------------------
+# Static analysis, deliberately. `freezecore/__init__.py` does not import its
+# submodules (so that `import freezecore` stays cheap and the `s3` extra stays
+# optional), which means dynamic introspection cannot resolve `freezecore:mgrs.*`
+# by attribute lookup. Static analysis reads the submodules directly.
+dynamic: false
+
+# GitHub Integration
+# ------------------
+repo: https://github.com/lqgentner/freezecore
+site_url: "https://lqgentner.github.io/freezecore/"
+
+source:
+  enabled: true
+  branch: main
+  placement: usage
+
+# freezecore is not published on PyPI -- it is installed straight from GitHub,
+# so the automatic PyPI link would 404.
+pypi: false
+
+authors:
+  - name: Luis Gentner
+    role: Author
+    email: luis.gentner@geo.uzh.ch
+    github: lqgentner
+
+# API Reference Structure
+# -----------------------
+# Organized by module rather than by object kind: freezecore is a collection of
+# helper modules, so "which module do I import from" is the question readers
+# actually have.
+#
+# Two deliberate omissions from the auto-generated config:
+#   * `mgrs.Hemisphere` / `mgrs.GeoArray` are declared under `if TYPE_CHECKING`
+#     and do not exist at runtime, so dynamic introspection cannot resolve them.
+#   * Re-exports (`vectordata.HTTPDownloader`, `vrt.rasterio_open`,
+#     `download.create_progress`, ...) are documented once, at the module that
+#     defines them.
+reference:
+  title: "API Reference"
+  desc: >-
+    Every public symbol in freezecore, grouped by the module that defines it.
+  sections:
+    - title: MGRS grid
+      desc: >-
+        `freezecore.mgrs` -- the 10 km MGRS grid squares that align raster data
+        from different sources onto one common grid.
+      contents:
+        - mgrs.MGRSGrid
+        - mgrs.MGRSGeoBox
+        - mgrs.UTMZones
+        - mgrs.mgrs_to_crs
+        - mgrs.utm_to_crs
+        - mgrs.utms_to_epsgs
+        - mgrs.transform_shapely
+
+    - title: Raster I/O
+      desc: >-
+        `freezecore.raster` -- rasterio helpers that accept local paths and
+        `s3://` URIs interchangeably.
+      contents:
+        - raster.rasterio_open
+        - raster.rewrite_tiff
+        - raster.write_cog
+        - raster.merge_tiffs
+        - raster.build_rasterio_profile
+        - raster.group_tiffs_by_crs
+        - raster.get_utm_zone_string
+        - raster.get_epsg_string
+        - raster.utm_zone_to_crs
+        - raster.COG_PROFILE
+        - raster.RASTERIO_PROFILE_DEFAULTS
+
+    - title: VRT generation
+      desc: "`freezecore.vrt` -- GDAL VRT files written without shelling out to gdalbuildvrt."
+      contents:
+        - vrt.create_decibel_vrt
+        - vrt.create_rgb_vrt
+        - vrt.build_vrt_mosaic
+
+    - title: Downloads
+      desc: "`freezecore.download` -- HTTP downloads with retries, progress bars and UPath destinations."
+      contents:
+        - download.HTTPDownloader
+        - download.retry_request
+
+    - title: S3
+      desc: >-
+        `freezecore.s3` -- S3 `UPath` construction and retry configuration.
+        Requires the `s3` extra.
+      contents:
+        - s3.make_s3_upath
+        - s3.s3_env
+
+    - title: Vector data
+      desc: "`freezecore.vectordata` and `freezecore.vectools` -- cached vector datasets and GeoDataFrame helpers."
+      contents:
+        - vectordata.GeoVectorData
+        - vectordata.DatasetMetadata
+        - vectools.save_and_read_parquet
+        - vectools.drop_z_if_zero
+        - vectools.is_z_axis_zero
+        - vectools.simplify_multipolygons
+
+    - title: Utilities
+      desc: "Small shared helpers used across the package."
+      contents:
+        - set_loglevel
+        - utils.get_cache_dir
+        - utils.get_data_dir
+        - utils.get_credentials_from_env
+        - utils.depends_on_optional
+        - utils.file_sha256
+        - utils.shorten_string
+        - utils.format_valid_options
+        - pandas_utils.clean_names
+        - progress.create_progress
+        - progress.track_progress
+
+# Jupyter Kernel
+# --------------
+# Used to execute the `{python}` chunks in the user guide.
+jupyter: python3
