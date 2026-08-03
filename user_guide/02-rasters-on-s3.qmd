@@ -10,24 +10,22 @@ import warnings
 warnings.filterwarnings("ignore")
 ```
 
-Satellite archives live in object storage, and the pipelines that consume them increasingly
+Many satellite archives live in object storage, and the pipelines that consume them increasingly
 write their outputs back there too. `freezecore.raster` exists so that reading and writing
-those rasters looks the same whether the file is on local disk or in a bucket.
+those rasters looks the same whether the file is on local disk or in a bucket. This is based on universal pathlibs UPath, which is extended to create interoperatibility with rasterio.
 
 ## The problem it solves
 
 `rasterio` can already open an `s3://` URI — GDAL's `/vsis3/` driver handles it. What it
 cannot do is work out *which* credentials to use. That is configured through GDAL
-environment variables (`AWS_ACCESS_KEY_ID`, `AWS_S3_ENDPOINT`, `AWS_NO_SIGN_REQUEST`, and
-a dozen more), set globally, at a different layer from the path you are opening.
+environment variables (e.g., `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_ENDPOINT`, and many more), set globally, at a different layer from the path you are opening.
 
 The result is code that carries credentials in one place and paths in another, and breaks
 in confusing ways when a pipeline touches two different object stores in one process.
 
 `freezecore` attaches the credentials to the path itself. `make_s3_upath()` builds a
 `UPath` that carries its storage options, and `rasterio_open()` reads those options back
-out and installs them into a GDAL environment for exactly the duration of the `with`
-block:
+out and installs them into a GDAL environment for exactly the duration of the `with` block:
 
 ```python
 from freezecore.raster import rasterio_open
@@ -62,8 +60,7 @@ import is lazy, so `freezecore.raster` works for local files without the extra.
 ## A real, public example
 
 The [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/) is a global
-30 m elevation model published on the AWS Open Data registry. The bucket is public, so
-`anon=True` sends unsigned requests and no account is needed:
+30 m elevation model published on the AWS Open Data registry. The bucket is public, so no credentials are needed.
 
 ```{python}
 from freezecore.raster import rasterio_open
@@ -88,7 +85,6 @@ with rasterio_open(dem_path) as src:
 
 Note what the source looks like: geographic coordinates (EPSG:4326), 3600 × 3600 pixels
 spanning a whole degree, with a pixel size in fractions of a degree rather than metres.
-It is a perfectly good DEM and completely unusable as a stacking target.
 
 ## Resampling onto a grid square
 
@@ -104,7 +100,7 @@ from freezecore.mgrs import MGRSGeoBox
 
 square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)
 
-dem = np.full(square.shape.yx, np.nan, dtype="float32")
+dem = np.full(square.shape.yx, np.nan, dtype=np.float32)
 with rasterio_open(dem_path) as src:
     reproject(
         source=src.read(1),
@@ -114,7 +110,7 @@ with rasterio_open(dem_path) as src:
         dst_transform=square.transform,
         dst_crs=square.crs,
         dst_nodata=np.nan,
-        resampling=Resampling.bilinear,
+        resampling=Resampling.cubic,
     )
 
 print(f"{square.mgrs_code}: {dem.shape} px @ {square.resolution.x} m in {square.crs}")
@@ -122,8 +118,7 @@ print(f"elevation: {np.nanmin(dem):.0f} m - {np.nanmax(dem):.0f} m")
 ```
 
 The DEM is now a 1000 × 1000 array in EPSG:32632 at exactly 10 m — the same array shape,
-CRS, and transform that every other source resampled onto `32TMS35` will have. That is the
-entire point of fixing the grid first.
+CRS, and transform that every other source resampled onto `32TMS35` will have.
 
 ```{python}
 #| fig-cap: "Copernicus DEM GLO-30 resampled onto MGRS grid square 32TMS35 (Fiescher/Aletsch area, Bernese Alps) at 10 m."

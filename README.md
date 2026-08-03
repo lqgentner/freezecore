@@ -1,23 +1,23 @@
 # freezecore
 
-Shared geospatial core utilities for glacier-mapping projects.
+Geospatial utilities for working with raster and vector datasets.
 
-freezecore is the common base extracted from
-[deepfreezer](https://github.com/lqgentner/deepfreezer), so that packages like
-[s1bursts](https://github.com/lqgentner/s1bursts) can depend on a small, stable
-set of helpers instead of re-implementing them.
+freezecore was developed when working on glacier mapping over large scales.
+This involves juggling with different projections due to spread-out AOIs and working with object storage to store vast amounts of raster data.
 
-Its centrepiece is **`MGRSGrid`**: a 10 km MGRS grid that gives every project a
+The centrepiece of freezecore is **`MGRSGrid`**: a 10 km MGRS grid that gives every location on earth a
 single, dataset-independent target to resample onto, so rasters from different
-sources stack without pairwise alignment. See
+sources stack without alignment. See
 [The MGRS grid](https://lqgentner.github.io/freezecore/user-guide/mgrs-grid.html)
 for the reasoning.
+
+freezecore also comes with helpers to read and write raster data on S3-style object storage. By bridging universal-pathlib and rasterio, this makes the experience as seamless as working on a local hard drive.
 
 ## Installation
 
 Requires Python 3.12 or newer, and [uv](https://docs.astral.sh/uv/) or pip.
 
-freezecore is not published on PyPI — install it from GitHub:
+freezecore is not published on PyPI yet — install it from GitHub:
 
 ```bash
 # uv
@@ -35,26 +35,11 @@ uv add "freezecore @ git+https://github.com/lqgentner/freezecore.git@v0.1.0"
 
 ### The `s3` extra
 
-`freezecore.s3` and the credentialed S3 paths used by `freezecore.raster` need
-`s3fs`, `fsspec`, and `boto3`. They are optional and lazily imported, so the base
-install stays lean:
+If you want to interact with S3-style object storage, install the optional dependencies `s3fs`, `fsspec`, and `boto3` with:
 
 ```bash
 uv add "freezecore[s3] @ git+https://github.com/lqgentner/freezecore.git"
 ```
-
-## Modules
-
-| Module | Contents |
-|---|---|
-| `freezecore.mgrs` | MGRS grid squares — `MGRSGrid`, `MGRSGeoBox`, `mgrs_to_crs` |
-| `freezecore.raster` | rasterio helpers with transparent S3 support — `rasterio_open`, `rewrite_tiff`, `merge_tiffs`, `write_cog` |
-| `freezecore.vrt` | GDAL VRT generation — `create_decibel_vrt`, `create_rgb_vrt`, `build_vrt_mosaic` |
-| `freezecore.download` | HTTP downloads with retries and progress — `HTTPDownloader`, `retry_request` |
-| `freezecore.s3` | S3 `UPath` construction and retry policy (needs the `s3` extra) |
-| `freezecore.vectordata` | Download-and-cache base class for vector datasets |
-| `freezecore.vectools`, `freezecore.pandas_utils` | GeoDataFrame / DataFrame helpers |
-| `freezecore.progress`, `freezecore.utils` | Shared progress-bar layout and small helpers |
 
 ## Quick start
 
@@ -92,11 +77,17 @@ with rasterio_open(path) as src:
     data = src.read(1)
 ```
 
-The credentials travel with the path, so s3fs (`exists()`, `iterdir()`) and GDAL (the
-raster read) always agree on them. Public buckets need `anon=True`:
+The credentials travel with the path, so pathlib-like methods (`exists()`, `iterdir()`, `glob()`) and GDAL (the
+raster reader) always agree on them. Public buckets need `anon=True`:
 
 ```python
-path = make_s3_upath("s3://copernicus-dem-30m/x.tif", anon=True, region="eu-central-1")
+tile = "Copernicus_DSM_COG_10_N46_00_E008_00_DEM"
+dem_path = make_s3_upath(
+    f"s3://copernicus-dem-30m/{tile}/{tile}.tif",
+    anon=True,
+    region="eu-central-1",
+)
+
 ```
 
 Download a file to a local directory or a bucket, with a progress bar:
@@ -122,54 +113,20 @@ rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)   # move
 Full documentation, including the MGRS grid guide and the S3 raster guide, is at
 **<https://lqgentner.github.io/freezecore/>**.
 
-## API stability
-
-freezecore is pre-1.0 (`0.x`). The public API may change between minor versions;
-breaking changes are called out in the
-[changelog](https://github.com/lqgentner/freezecore/blob/main/CHANGELOG.md). Names prefixed
-with an underscore are private and may change at any time.
-
-The package ships a `py.typed` marker, so downstream type checkers use its inline
-annotations.
-
 ## Support
 
 This is a small internal core library maintained on a best-effort basis. Please
 file bugs and questions on the
 [issue tracker](https://github.com/lqgentner/freezecore/issues).
 
-## Development
-
-Uses [uv](https://docs.astral.sh/uv/):
+## Contributing
 
 ```bash
+git clone https://github.com/lqgentner/freezecore.git
+cd freezecore
 uv sync --all-extras
 uv run pytest
-uv run ruff format && uv run ruff check --fix
-uv run mypy src/freezecore
 ```
 
-### Building the docs
-
-The documentation is built with [Great Docs](https://posit-dev.github.io/great-docs/),
-which renders through [Quarto](https://quarto.org/docs/get-started/) — install
-Quarto separately, then:
-
-```bash
-uv sync --group docs
-uv run great-docs build      # writes great-docs/_site/
-uv run great-docs preview    # live-reloading local server
-```
-
-The user guide executes its code at build time, reading a public S3 bucket and
-fetching basemap tiles. Those outputs are cached in the tracked `_freeze/`
-directory, so a page is only re-executed when its own `.qmd` changes — an edit
-to the README or a docstring rebuilds without touching the network.
-
-To force a refresh after changing library behaviour rather than page source:
-
-```bash
-uv run great-docs freeze --info                       # what is cached and stale
-uv run great-docs freeze user_guide/01-mgrs-grid.qmd  # re-execute one page
-git add _freeze/                                      # commit the new outputs
-```
+See the [contributing guide](https://lqgentner.github.io/freezecore/user-guide/contributing.html)
+for the full checks, the S3 integration tests, and how to build these docs.

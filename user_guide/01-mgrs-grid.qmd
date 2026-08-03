@@ -10,42 +10,30 @@ import warnings
 warnings.filterwarnings("ignore")
 ```
 
-`freezecore.mgrs` is the part of this package worth reading about. Everything else is
-plumbing; this is a decision about how your data is laid out on the ground.
+freezecore's MGRS grid is the star of this package. It's a fast, easy to use grid metadata standard that allows working with multimodal raster data.
 
 ## Why a common grid
 
-Glacier mapping means stacking rasters that were never meant to be stacked. A Sentinel-1
-backscatter scene, a Sentinel-2 optical composite, a DEM, and a rasterised glacier
-inventory arrive in different coordinate reference systems, at different resolutions,
+When doing deep learning with satellite-based Earth Observation data, this often means stacking rasters that were never meant to be stacked. A Sentinel-1
+backscatter scene, a Sentinel-2 optical composite, a DEM, and a glacier outline arrive in different coordinate reference systems, at different resolutions,
 cut into different tiles. Before any of it reaches a model, it has to be resampled onto
-something shared.
+something shared. `MGRSGrid` is that fixed target.
 
-The tempting approach is to align each new layer to whichever layer you happen to have
-first. That works until you have four sources, at which point you own six pairwise
-alignment paths and no single answer to "what is at pixel (400, 250)?".
+In addition, more and more projects do global scale analysis. Where you could previously define a single Area of Interest
+with single projection, things break down once you go global. Handling different area of interests with different projections is what this grid system is set out to simplify.
 
-The alternative is to fix the target **once**, independently of any particular dataset,
-and resample everything onto it. Then pixel `(400, 250)` of the DEM and pixel
-`(400, 250)` of the backscatter refer to the same 10 m of ground, by construction. Layers
-stack into an array without further thought, and a patch of one source is trivially
-co-registered with the same patch of every other.
 
-`MGRSGrid` is that fixed target.
 
 ## Why MGRS
 
-The grid could have been arbitrary. Using the [Military Grid Reference
-System](https://en.wikipedia.org/wiki/Military_Grid_Reference_System) instead buys three
-things:
+This grid isn't defining a new standard. Instead, as the name suggests, it implements the [Military Grid Reference
+System](https://en.wikipedia.org/wiki/Military_Grid_Reference_System). This has the following advantages:
 
 **It is an established standard.** MGRS is a well-specified subdivision of UTM with
 decades of use. Nothing here needs inventing or defending.
 
 **Sentinel-2 already uses it.** Copernicus distributes Sentinel-2 products on MGRS 100 km
-squares (`T32TMS` and friends). Sharing the reference system means the mapping between a
-freezecore grid square and the Sentinel-2 products covering it is a string operation
-rather than a geometric query.
+squares (`T32TMS` and friends). When ingesting Sentinel-2 data, this means no quality-loosing resampling is needed.
 
 **Its squares are metric and axis-aligned.** Each MGRS square lives in a UTM zone, so
 distances are in metres and the grid is aligned to the projection axes. A 10 m pixel is
@@ -53,21 +41,14 @@ distances are in metres and the grid is aligned to the projection axes. A 10 m p
 
 ### Where freezecore's grid differs
 
-freezecore does **not** reuse the Sentinel-2 tiling. It reuses the MGRS *reference
-system* and defines its own squares on top, differing in two ways:
+Compared to Sentinel-2's tiling grid, freezecore comes with two main advantages:
 
-**No overlap.** Sentinel-2 tiles are 109.8 km across but step by 100 km, so neighbouring
-tiles duplicate roughly 9.8 km of ground on each shared edge. That redundancy is
-deliberate for scene mosaicking, and expensive: Bauer-Marschallinger & Falkner (2023)
-measured it as a 33% inflation of global land area and about a petabyte of extra
-Sentinel-2 product volume per year.[^1] freezecore's squares tile their UTM zone edge to
-edge, storing each location once.
 
-**10 × 10 km squares, not 100 × 100 km.** A 100 km square at 10 m resolution is a
-10 000 × 10 000 pixel array — too coarse a unit to download, cache, or hand to a model.
-At 10 km, one square is 1000 × 1000 pixels: small enough to fetch exactly the squares an
-AOI touches and skip the rest, and small enough to be a reasonable working unit
-throughout a pipeline.
+**10 × 10 km squares for targeted downloading** Instead of working with 100 km × 100 km like Sentinel-2, 10 km × 10 km squares allow to specifically match an area of interest. This allows for targeted download of raster data. It speeds up download speed and reduces storage demand. Ideal for global scale analysis of scattered AOIs, like glaciers.
+
+**No overlap.** Sentinel-2 tiles come with a wasteful[^1]overlap. freezecore's squares tile their UTM zone edge to
+edge, storing each location only once.
+
 
 [^1]: Bauer-Marschallinger, B., & Falkner, K. (2023). Wasting petabytes: A survey of the
 Sentinel-2 UTM tiling grid and its spatial overhead. *ISPRS Journal of Photogrammetry and
@@ -75,15 +56,14 @@ Remote Sensing*, 202, 682–690. <https://doi.org/10.1016/j.isprsjprs.2023.07.01
 
 ### A specification, not a dataset
 
-Worth stating plainly: `MGRSGrid` holds no pixels. It is a grid *specification* — a rule
+`MGRSGrid` holds no pixels. It is a grid *specification* — a rule
 for deriving, from an MGRS code, exactly one CRS, one affine transform, and one array
 shape. Two pipelines that never exchange a file will still produce byte-aligned rasters
 if they both resample onto the square named `32TMS35`.
 
 ## Building a grid for an AOI
 
-Construct a grid by handing it an area of interest in WGS84. Any shapely geometry works —
-a box, a hand-drawn polygon, or a `GeoSeries` from a shapefile you already have.
+Construct a grid by handing it an area of interest in WGS84. Any shapely geometry works -- from a single polygon to a `geopandas.GeoSeries` containing thousands of geometries.
 
 The AOI below deliberately straddles 6° E, the boundary between UTM zones 31 and 32, so
 the grid has to span two zones:
@@ -93,8 +73,8 @@ from shapely import box
 
 from freezecore.mgrs import MGRSGrid
 
-# Western Alps: Mont Blanc massif through the Vanoise, crossing 6°E
-aoi = box(5.9, 45.6, 7.1, 46.2)
+# Geneva, Switzerland
+aoi = box(5.8, 46.0, 6.5, 46.4)
 grid = MGRSGrid(aoi)
 
 len(grid)
@@ -126,38 +106,40 @@ zone 31 and zone 32 grids are each axis-aligned in *their own* projection, they 
 rotated relative to one another once drawn in a common CRS:
 
 ```{python}
-#| fig-cap: "10 km grid squares over the Western Alps AOI, coloured by UTM zone. The zone 31 squares (left) are visibly rotated against the zone 32 squares, because each grid is axis-aligned in its own projection. The darker band where the two colours overlap is the zone-boundary duplication discussed at the end of this page."
+#| fig-cap: "10 km grid squares over Geneva, Switzerland, coloured by UTM zone. The zone 31 squares (left) are visibly rotated against the zone 32 squares, because each grid is axis-aligned in its own projection."
 #| warning: false
 import contextily as cx
 import geopandas as gpd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+import pyproj
+
+WEB_MERCATOR = pyproj.CRS(3857)
 
 # Web Mercator, so the squares and the basemap tiles agree
-squares = gdf.to_crs(3857)
-aoi_gdf = gpd.GeoDataFrame(geometry=[aoi], crs=4326).to_crs(3857)
+squares = gdf.to_crs(WEB_MERCATOR)
+aoi_gdf = gpd.GeoDataFrame(geometry=[aoi], crs=4326).to_crs(WEB_MERCATOR)
 
-zone_colors = {31: "#2a9d8f", 32: "#e76f51"}
+zone_colors = {31: "tab:blue", 32: "tab:red"}
+alpha = 0.2
 
 fig, ax = plt.subplots(figsize=(9, 6))
 for zone, color in zone_colors.items():
     squares[squares.zone == zone].plot(
-        ax=ax, facecolor=color, alpha=0.45, edgecolor=color, linewidth=0.7
+        ax=ax, facecolor=color, alpha=alpha, edgecolor=color, linewidth=1.0
     )
-aoi_gdf.boundary.plot(ax=ax, color="#1d3557", linewidth=2.0, linestyle="--")
+aoi_gdf.boundary.plot(ax=ax, color="k", linewidth=2.0, linestyle="--")
 
-cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, crs=squares.crs, attribution_size=6)
+cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, crs=WEB_MERCATOR, attribution_size=6)
 ax.legend(
     handles=[
-        *(Patch(facecolor=c, alpha=0.45, edgecolor=c, label=f"UTM zone {z}")
+        *(Patch(facecolor=c, alpha=alpha, edgecolor=c, label=f"UTM zone {z}")
           for z, c in zone_colors.items()),
-        Patch(facecolor="none", edgecolor="#1d3557", linestyle="--", label="AOI"),
+        Patch(facecolor="none", edgecolor="k", linestyle="--", label="AOI"),
     ],
-    loc="upper left",
+    loc="lower right",
     frameon=True,
-)
-ax.set_axis_off()
-plt.show()
+);
 ```
 
 ## A grid square is a GeoBox
@@ -177,7 +159,7 @@ georeferenced raster — CRS, affine transform, and shape — which is exactly t
 things a resampling call needs:
 
 ```{python}
-print(f"code:       {square.mgrs_code}")
+print(f"mgrs_code:  {square.mgrs_code}")
 print(f"crs:        {square.crs}")
 print(f"shape:      {square.shape}")
 print(f"resolution: {square.resolution}")
@@ -271,18 +253,15 @@ The square's footprint never changes with resolution — only how finely it is s
 That means a 10 m layer and a 20 m layer of the same square remain exactly co-registered,
 with an integer scale factor between them.
 
-## One caveat: zone boundaries
+## Zone boundaries
 
-Within a UTM zone the squares are a strict partition: they tile the zone edge to edge with
-no gaps and no double coverage.
-
-Across a zone boundary that no longer holds. Each zone's grid is built independently, so a
-square in zone 31 and a square in zone 32 can cover overlapping ground. For this AOI —
+Within a UTM zone, the squares tile the zone edge to edge with no gaps and no double coverage. Across a zone boundary that no longer holds. Each zone's grid is built independently and squares that span span into the next zone are kept to make sure there are no holes in the coverage.
+However, this means that a square in zone 31 and a square in zone 32 can cover overlapping ground. For this AOI —
 chosen to straddle a boundary, so close to a worst case — the duplication is:
 
 ```{python}
-EQUAL_AREA = "+proj=laea +lat_0=46 +lon_0=6.5 +datum=WGS84 +units=m"
-areas = gdf.to_crs(EQUAL_AREA)
+LAEA = pyproj.CRS(3035)
+areas = gdf.to_crs(LAEA)
 
 covered = areas.union_all().area
 summed = areas.area.sum()
@@ -292,17 +271,7 @@ print(f"ground covered: {covered / 1e6:8.0f} km²")
 print(f"duplication:    {(summed - covered) / covered:8.1%}")
 ```
 
-This is inherent to any UTM-based grid, and is one of the redundancies the *Wasting
-petabytes* survey counts. It only matters at boundaries: an AOI that sits inside a single
-zone has none of it.
-
-If you need a strict partition across a boundary, filter to one zone and accept the
-distortion of using it slightly outside its nominal range:
-
-```{python}
-zone_32_only = gdf[gdf.zone == 32]
-len(zone_32_only)
-```
+This redundancy is inherent to any UTM-based grid when working across zone boundaries. Due to the small footprint of the squares, the overlap can be kept to a minimum.
 
 ## Next
 

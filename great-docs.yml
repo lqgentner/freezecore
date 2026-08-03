@@ -2,20 +2,10 @@
 # See https://posit-dev.github.io/great-docs/user-guide/configuration.html
 
 display_name: freezecore
-
-# Docstring Parser
-# ----------------
-# The codebase is numpydoc throughout (enforced by ruff's pydocstyle
-# convention = "numpy" in pyproject.toml).
 parser: numpy
-
-# Dynamic Introspection
-# ---------------------
-# Static analysis, deliberately. `freezecore/__init__.py` does not import its
-# submodules (so that `import freezecore` stays cheap and the `s3` extra stays
-# optional), which means dynamic introspection cannot resolve `freezecore:mgrs.*`
-# by attribute lookup. Static analysis reads the submodules directly.
 dynamic: false
+# Not published on PyPI -- it is installed straight from GitHub
+pypi: false
 
 # GitHub Integration
 # ------------------
@@ -27,28 +17,52 @@ source:
   branch: main
   placement: usage
 
-# freezecore is not published on PyPI -- it is installed straight from GitHub,
-# so the automatic PyPI link would 404.
-pypi: false
 
+# Author Information
+# ------------------
 authors:
   - name: Luis Gentner
     role: Author
     email: luis.gentner@geo.uzh.ch
     github: lqgentner
 
+# Logo & Favicon
+# --------------
+logo:
+  light: assets/logo.png
+  dark: assets/logo-dark.png
+
+favicon: assets/favicon.png
+
+hero:
+  name: false
+
+# SEO
+# ---
+# Quarto already writes correct <title>s ("freezecore" on the homepage,
+# "The MGRS grid – freezecore" elsewhere). Great Docs' post-render step then
+# appends "| {site_name}" on top, producing "freezecore | freezecore", because
+# its "already templated?" guard tests for an ASCII " - " while Quarto joins
+# with an en dash (U+2013). Emitting just the page title suppresses the second
+# append. Revisit if great-docs > 0.16.0 fixes post-render.py:430.
+seo:
+  title_template: "{page_title}"
+
+# Theming
+# -------
+content_style: mint
+navbar_style: mint
+
+# Icons
+# -----
+nav_icons:
+  sidebar:
+    The MGRS grid: globe
+    Rasters on S3: box
+    Contributing: wrench
+
 # API Reference Structure
 # -----------------------
-# Organized by module rather than by object kind: freezecore is a collection of
-# helper modules, so "which module do I import from" is the question readers
-# actually have.
-#
-# Two deliberate omissions from the auto-generated config:
-#   * `mgrs.Hemisphere` / `mgrs.GeoArray` are declared under `if TYPE_CHECKING`
-#     and do not exist at runtime, so dynamic introspection cannot resolve them.
-#   * Re-exports (`vectordata.HTTPDownloader`, `vrt.rasterio_open`,
-#     `download.create_progress`, ...) are documented once, at the module that
-#     defines them.
 reference:
   title: "API Reference"
   desc: >-
@@ -56,8 +70,7 @@ reference:
   sections:
     - title: MGRS grid
       desc: >-
-        `freezecore.mgrs` -- the 10 km MGRS grid squares that align raster data
-        from different sources onto one common grid.
+        10 km MGRS grid squares to align raster data onto one common grid.
       contents:
         - mgrs.MGRSGrid
         - mgrs.MGRSGeoBox
@@ -69,8 +82,7 @@ reference:
 
     - title: Raster I/O
       desc: >-
-        `freezecore.raster` -- rasterio helpers that accept local paths and
-        `s3://` URIs interchangeably.
+        rasterio helpers that accept local paths and `s3://` URIs via UPath.
       contents:
         - raster.rasterio_open
         - raster.rewrite_tiff
@@ -85,28 +97,27 @@ reference:
         - raster.RASTERIO_PROFILE_DEFAULTS
 
     - title: VRT generation
-      desc: "`freezecore.vrt` -- GDAL VRT files written without shelling out to gdalbuildvrt."
+      desc: Build VRT files without the Python GDAL dependency
       contents:
         - vrt.create_decibel_vrt
         - vrt.create_rgb_vrt
         - vrt.build_vrt_mosaic
 
     - title: Downloads
-      desc: "`freezecore.download` -- HTTP downloads with retries, progress bars and UPath destinations."
+      desc: HTTP downloads with UPath destinations
       contents:
         - download.HTTPDownloader
         - download.retry_request
 
     - title: S3
       desc: >-
-        `freezecore.s3` -- S3 `UPath` construction and retry configuration.
-        Requires the `s3` extra.
+        S3 `UPath` construction and retry configuration
       contents:
         - s3.make_s3_upath
         - s3.s3_env
 
     - title: Vector data
-      desc: "`freezecore.vectordata` and `freezecore.vectools` -- cached vector datasets and GeoDataFrame helpers."
+      desc: Cached vector datasets and GeoDataFrame helpers
       contents:
         - vectordata.GeoVectorData
         - vectordata.DatasetMetadata
@@ -116,7 +127,7 @@ reference:
         - vectools.simplify_multipolygons
 
     - title: Utilities
-      desc: "Small shared helpers used across the package."
+      desc: Shared helpers used across the package
       contents:
         - set_loglevel
         - utils.get_cache_dir

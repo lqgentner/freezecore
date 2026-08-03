@@ -1,0 +1,131 @@
+---
+title: "Contributing"
+---
+
+freezecore is a small core library maintained on a best-effort basis. Bug reports and
+questions belong on the
+[issue tracker](https://github.com/lqgentner/freezecore/issues).
+
+## Setting up
+
+The project uses [uv](https://docs.astral.sh/uv/). One command creates the
+venv and installs all (development) dependencies:
+
+```bash
+git clone https://github.com/lqgentner/freezecore.git
+cd freezecore
+uv sync --all-extras
+```
+
+`--all-extras` matters: the `s3` extra is optional at runtime but the test suite imports
+`freezecore.s3`, so a bare `uv sync` leaves those tests skipped.
+
+## The checks
+
+These are the same four commands CI runs, so a clean run locally means a clean run there:
+
+```bash
+uv run pytest
+uv run ruff format && uv run ruff check --fix
+uv run mypy src/freezecore
+```
+
+A few things worth knowing about each.
+
+**Tests.** The suite is fast (a few seconds) and offline. Tests marked `integration` need a
+live S3-compatible service and are skipped unless the `FREEZECORE_TEST_S3_*` environment
+variables are set — see [S3 integration tests](#s3-integration-tests) below.
+
+**Lint.** `ruff` runs with a broad rule set and numpydoc docstring conventions, both
+configured in `pyproject.toml`. Docstrings on public functions need `Parameters`,
+`Returns`, and `Raises` sections; the linter enforces it.
+
+**Types.** The package ships a `py.typed` marker, so its annotations are part of the public
+contract. `mypy` must pass on `src/freezecore` before a change lands.
+
+## S3 integration tests
+
+The credentialed S3 read/write paths cannot be exercised by unit tests — they need a real
+object store. CI runs them against MinIO in a container, and you can do the same:
+
+```bash
+docker run -d --name minio -p 9000:9000 \
+  -e MINIO_ROOT_USER=testkey -e MINIO_ROOT_PASSWORD=testsecret \
+  minio/minio server /data
+
+FREEZECORE_TEST_S3_ENDPOINT=http://localhost:9000 \
+FREEZECORE_TEST_S3_KEY=testkey \
+FREEZECORE_TEST_S3_SECRET=testsecret \
+  uv run pytest -q -m integration
+```
+
+Run these whenever you touch `freezecore.s3` or the S3 branches of `freezecore.raster`.
+The unit tests mock the object store, so they will not catch a broken credential or
+endpoint path.
+
+## Dependency lower bounds
+
+Every dependency carries a lower bound chosen as the oldest release that actually installs
+and works on Python 3.12. CI has a dedicated job that resolves
+with `--resolution lowest-direct` and runs the suite against those pins:
+
+```bash
+uv sync --all-extras --resolution lowest-direct --python 3.12
+uv run --no-sync pytest -q
+```
+
+If you use a newer API, raise the corresponding bound in `pyproject.toml` and note why in
+the comment above the dependency list. `--no-sync` matters here: without it, `uv run`
+re-resolves the environment back to the latest versions before running.
+
+## Building the docs
+
+The documentation is built with [Great Docs](https://posit-dev.github.io/great-docs/),
+which renders through [Quarto](https://quarto.org/docs/get-started/). Quarto is a separate
+install — see [its getting-started page](https://quarto.org/docs/get-started/) — and is not
+managed by uv.
+
+```bash
+uv sync --group docs
+uv run great-docs build      # writes great-docs/_site/
+uv run great-docs preview    # serves great-docs/_site/ on port 3000
+```
+
+::: {.callout-important}
+## `preview` does not rebuild
+
+`great-docs preview` is a static file server over `great-docs/_site/`. It only builds when
+that directory is missing, so it will happily serve a stale site after you edit a page or
+`great-docs.yml`. Use `great-docs build` to refresh, or `great-docs build --watch` in a
+second terminal to rebuild on change.
+:::
+
+`great-docs.yml` is committed; the `great-docs/` build directory is ephemeral and
+gitignored.
+
+### The freeze cache
+
+The user guide executes its code at build time — it reads a public S3 bucket and fetches
+basemap tiles. Those outputs are cached in the tracked `_freeze/` directory, so a page is
+only re-executed when its own `.qmd` changes. Editing the README or a docstring rebuilds
+without touching the network, which also keeps CI builds off the tile server.
+
+That caching is keyed on page source, not on library behaviour. If you change something
+that alters a page's *output* without changing the page itself, refresh it explicitly:
+
+```bash
+uv run great-docs freeze --info                       # what is cached and stale
+uv run great-docs freeze user_guide/01-mgrs-grid.qmd  # re-execute one page
+git add _freeze/                                      # commit the new outputs
+```
+
+## Releasing
+
+Versions come from git tags via `hatch-vcs`, so there is no version string to edit. Record
+changes in [`CHANGELOG.md`](https://github.com/lqgentner/freezecore/blob/main/CHANGELOG.md)
+under `[Unreleased]` as you go, following
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+The project is pre-1.0, so minor releases may contain breaking changes — but they must be
+labelled. Mark anything that changes existing behaviour with **Breaking:** and show the
+before/after, so the entry is enough on its own to fix a downstream call site.
