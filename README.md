@@ -92,6 +92,13 @@ with rasterio_open(path) as src:
     data = src.read(1)
 ```
 
+The credentials travel with the path, so s3fs (`exists()`, `iterdir()`) and GDAL (the
+raster read) always agree on them. Public buckets need `anon=True`:
+
+```python
+path = make_s3_upath("s3://copernicus-dem-30m/x.tif", anon=True, region="eu-central-1")
+```
+
 Download a file to a local directory or a bucket, with a progress bar:
 
 ```python

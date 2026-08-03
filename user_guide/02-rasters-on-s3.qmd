@@ -42,6 +42,15 @@ Because the configuration travels with the path, two stores in the same process 
 interfere, and `rasterio_open()` is otherwise a drop-in replacement for `rasterio.open()`
 — a plain `Path` or `str` opens a local file with no S3 machinery involved.
 
+Crucially, the path carries *one* answer about how to authenticate, which both layers
+that touch it read: s3fs for filesystem operations, and GDAL for the actual raster I/O.
+They cannot end up disagreeing about the same path.
+
+`make_s3_upath()` mirrors `s3fs.S3FileSystem`'s signature, so `anon` defaults to `False`:
+credentials come from the `key`/`secret` you pass, or from boto's resolver (environment
+variables, config files, EC2 IAM server). Anonymous access to a public bucket is opt-in
+with `anon=True`.
+
 ::: {.callout-note}
 ## Requires the `s3` extra
 
@@ -54,7 +63,7 @@ import is lazy, so `freezecore.raster` works for local files without the extra.
 
 The [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/) is a global
 30 m elevation model published on the AWS Open Data registry. The bucket is public, so
-omitting `key` and `secret` sends unsigned requests and no account is needed:
+`anon=True` sends unsigned requests and no account is needed:
 
 ```{python}
 from freezecore.raster import rasterio_open
@@ -64,6 +73,7 @@ from freezecore.s3 import make_s3_upath
 tile = "Copernicus_DSM_COG_10_N46_00_E008_00_DEM"
 dem_path = make_s3_upath(
     f"s3://copernicus-dem-30m/{tile}/{tile}.tif",
+    anon=True,
     region="eu-central-1",
 )
 
@@ -185,22 +195,18 @@ rewrite_tiff(src_on_store_a, dst_on_store_b, move=True)         # S3 -> S3, then
 
 ## Listing objects
 
-One gap worth knowing about. `make_s3_upath()` configures anonymous access for *GDAL*, via
-`rasterio_open()`, but it has no `anon` passthrough to `s3fs`. Filesystem-level operations
-on the returned path — `.exists()`, `.iterdir()`, `.glob()` — therefore still try to sign
-their requests and fail on a public bucket with `NoCredentialsError`.
-
-Until that is exposed, use a plain `UPath` with `anon=True` for listing:
+A path from `make_s3_upath()` is an ordinary `UPath`, so the usual filesystem operations
+work on it directly — and under the same credentials the raster reads use:
 
 ```{python}
-from upath import UPath
-
-bucket = UPath("s3://copernicus-dem-30m/", anon=True)
+bucket = make_s3_upath("s3://copernicus-dem-30m/", anon=True, region="eu-central-1")
 [p.name for p in list(bucket.iterdir())[:3]]
 ```
 
-Reading is unaffected — `rasterio_open()` on a `make_s3_upath()` path works anonymously,
-as everything above this section demonstrates.
+`.exists()`, `.stat()`, and `.glob()` behave the same way. This matters more than it
+looks: discovering which tiles exist and then reading them are the two halves of the same
+job, and they run through different libraries (s3fs and GDAL). Because the decision is
+resolved once and stored on the path, a bucket you can list is a bucket you can read.
 
 ## Related helpers
 
