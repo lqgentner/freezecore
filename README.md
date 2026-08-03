@@ -1,17 +1,24 @@
 # freezecore
 
-Geospatial utilities for working with raster and vector datasets.
+Lightweight geospatial helpers for reproducible MGRS grids and local or
+S3-backed raster workflows.
 
-freezecore was developed when working on glacier mapping over large scales.
-This involves juggling with different projections due to spread-out AOIs and working with object storage to store vast amounts of raster data.
+freezecore grew out of large-scale glacier mapping, where scattered areas of
+interest require several local projections and large raster collections live
+in object storage.
 
-The centrepiece of freezecore is **`MGRSGrid`**: a 10 km MGRS grid that gives every location on earth a
-single, dataset-independent target to resample onto, so rasters from different
-sources stack without alignment. See
+The centrepiece of freezecore is **`MGRSGrid`**: a 10 km grid for the UTM-covered
+world that gives every MGRS code a dataset-independent target backed by an
+[`odc.geo.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html).
+Rasters resampled to the same code and resolution share their CRS, transform,
+and shape. See
 [The MGRS grid](https://lqgentner.github.io/freezecore/user-guide/mgrs-grid.html)
 for the reasoning.
 
-freezecore also comes with helpers to read and write raster data on S3-style object storage. By bridging universal-pathlib and rasterio, this makes the experience as seamless as working on a local hard drive.
+The S3 helpers bridge
+[Universal Pathlib](https://universal-pathlib.readthedocs.io/) and
+[Rasterio](https://rasterio.readthedocs.io/), so filesystem operations and
+GDAL raster I/O use the same per-path credentials and endpoint configuration.
 
 ## Installation
 

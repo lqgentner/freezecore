@@ -1,6 +1,6 @@
 [project]
 name = "freezecore"
-description = "Shared geospatial core utilities: MGRS grid, raster/S3 helpers, HTTP download tooling."
+description = "Lightweight geospatial helpers for reproducible MGRS grids and local or S3-backed raster workflows."
 authors = [
   { name = "Luis Gentner" , email = "luis.gentner@geo.uzh.ch"},
 ]
