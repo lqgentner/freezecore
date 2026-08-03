@@ -10,63 +10,104 @@ import warnings
 warnings.filterwarnings("ignore")
 ```
 
-Many satellite archives live in object storage, and the pipelines that consume them increasingly
-write their outputs back there too. `freezecore.raster` exists so that reading and writing
-those rasters looks the same whether the file is on local disk or in a bucket. This is based on universal pathlibs UPath, which is extended to create interoperatibility with rasterio.
+freezecore connects two libraries that normally see object storage
+independently: [Universal Pathlib](https://universal-pathlib.readthedocs.io/)
+provides pathlib-style S3 paths through `UPath`, while
+[Rasterio](https://rasterio.readthedocs.io/) and GDAL perform the raster I/O.
+One configured path supplies the same authentication and endpoint settings to
+both layers.
 
-## The problem it solves
+## The two-client problem
 
-`rasterio` can already open an `s3://` URI — GDAL's `/vsis3/` driver handles it. What it
-cannot do is work out *which* credentials to use. That is configured through GDAL
-environment variables (e.g., `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_ENDPOINT`, and many more), set globally, at a different layer from the path you are opening.
+Rasterio can open an `s3://` URI using GDAL's `/vsis3/` driver, and s3fs can
+list the same bucket through a `UPath`. Both support credentials, but they do
+not ordinarily share a per-path configuration. This becomes especially
+awkward when one process uses multiple accounts or S3-compatible services such
+as MinIO or Ceph.
 
-The result is code that carries credentials in one place and paths in another, and breaks
-in confusing ways when a pipeline touches two different object stores in one process.
-
-`freezecore` attaches the credentials to the path itself. `make_s3_upath()` builds a
-`UPath` that carries its storage options, and `rasterio_open()` reads those options back
-out and installs them into a GDAL environment for exactly the duration of the `with` block:
+`make_s3_upath()` attaches storage options to a `UPath`. Filesystem operations
+read them through s3fs, while `rasterio_open()` translates them into a scoped
+Rasterio environment for the duration of its `with` block:
 
 ```python
 from freezecore.raster import rasterio_open
 from freezecore.s3 import make_s3_upath
 
-path = make_s3_upath("s3://my-bucket/scene.tif", key=..., secret=...)
+# With no explicit key pair, both layers use the normal boto credential chain.
+path = make_s3_upath("s3://my-bucket/scene.tif")
 with rasterio_open(path) as src:
     data = src.read(1)
 ```
 
-Because the configuration travels with the path, two stores in the same process do not
-interfere, and `rasterio_open()` is otherwise a drop-in replacement for `rasterio.open()`
-— a plain `Path` or `str` opens a local file with no S3 machinery involved.
-
-Crucially, the path carries *one* answer about how to authenticate, which both layers
-that touch it read: s3fs for filesystem operations, and GDAL for the actual raster I/O.
-They cannot end up disagreeing about the same path.
-
-`make_s3_upath()` mirrors `s3fs.S3FileSystem`'s signature, so `anon` defaults to `False`:
-credentials come from the `key`/`secret` you pass, or from boto's resolver (environment
-variables, config files, EC2 IAM server). Anonymous access to a public bucket is opt-in
-with `anon=True`.
+A local `str` or `Path` works through the same raster helper without any S3
+configuration. The wrapper deliberately supports local and S3 paths; other
+`UPath` protocols are not accepted by Rasterio helpers.
 
 ::: {.callout-note}
-## Requires the `s3` extra
+## Install the S3 extra
 
-`freezecore.s3` needs `s3fs`, `fsspec`, and `boto3`. Install with
-`pip install "freezecore[s3] @ git+https://github.com/lqgentner/freezecore.git"`. The
-import is lazy, so `freezecore.raster` works for local files without the extra.
+The S3 integration requires s3fs, fsspec, and boto3:
+
+```bash
+pip install "freezecore[s3] @ git+https://github.com/lqgentner/freezecore.git"
+```
+
+These dependencies are imported lazily, so local raster operations work with
+the base installation.
 :::
 
-## A real, public example
+## Authentication patterns
 
-The [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/) is a global
-30 m elevation model published on the AWS Open Data registry. The bucket is public, so no credentials are needed.
+Signed access uses boto's normal credential resolver when no credentials are
+passed. This is the preferred choice for AWS profiles, environment variables,
+and workload roles:
+
+```python
+private = make_s3_upath("s3://private-bucket/scene.tif")
+```
+
+Public buckets require explicit anonymous access:
+
+```python
+public = make_s3_upath("s3://public-bucket/scene.tif", anon=True)
+```
+
+Explicit credentials, temporary session tokens, regions, and custom endpoints
+are supported for S3-compatible storage:
+
+```python
+custom = make_s3_upath(
+    "s3://imagery/scene.tif",
+    key=...,
+    secret=...,
+    token=...,                 # optional STS/session token
+    endpoint_url="https://objects.example.org",
+    region="eu-central-1",
+)
+```
+
+`anon=True` cannot be combined with credentials. The helper also configures
+retries for both the s3fs/botocore and GDAL paths, plus checksum defaults that
+avoid trailers rejected by some S3-compatible gateways.
+
+::: {.callout-warning}
+## Treat configured paths as sensitive
+
+Explicit credentials are stored in the `UPath`'s `storage_options`. Do not log,
+publish, or serialize those options. Prefer the boto credential chain or
+short-lived workload credentials where possible.
+:::
+
+## Read a public raster
+
+The [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/) is a
+public collection of Cloud-Optimized GeoTIFFs. The same configured path can be
+inspected through Universal Pathlib and opened through Rasterio:
 
 ```{python}
 from freezecore.raster import rasterio_open
 from freezecore.s3 import make_s3_upath
 
-# GLO-30 is tiled into 1° x 1° COGs named by their south-west corner.
 tile = "Copernicus_DSM_COG_10_N46_00_E008_00_DEM"
 dem_path = make_s3_upath(
     f"s3://copernicus-dem-30m/{tile}/{tile}.tif",
@@ -74,87 +115,34 @@ dem_path = make_s3_upath(
     region="eu-central-1",
 )
 
-with rasterio_open(dem_path) as src:
-    print(f"driver:     {src.driver}")
-    print(f"crs:        {src.crs}")
-    print(f"shape:      {src.shape}")
-    print(f"dtype:      {src.dtypes[0]}")
-    print(f"bounds:     {tuple(round(v) for v in src.bounds)}")
-    print(f"overviews:  {src.overviews(1)}")
+print(f"exists: {dem_path.exists()}")  # s3fs
+with rasterio_open(dem_path) as src:   # GDAL
+    print(f"driver:    {src.driver}")
+    print(f"crs:       {src.crs}")
+    print(f"shape:     {src.shape}")
+    print(f"bounds:    {tuple(round(value) for value in src.bounds)}")
+    print(f"overviews: {src.overviews(1)}")
 ```
 
-Note what the source looks like: geographic coordinates (EPSG:4326), 3600 × 3600 pixels
-spanning a whole degree, with a pixel size in fractions of a degree rather than metres.
+Methods such as `.exists()`, `.stat()`, `.iterdir()`, and `.glob()` use the
+same path configuration as the raster read. Avoid wrapping a potentially large
+bucket listing in `list()` merely to inspect its first few entries; use
+`itertools.islice()` when only a sample is needed.
 
-## Resampling onto a grid square
+## Write and copy rasters
 
-This is where the [MGRS grid](01-mgrs-grid.qmd) pays off. An `MGRSGeoBox` carries the
-three things `rasterio.warp.reproject` needs for its destination — `crs`, `transform`,
-and `shape` — so the resampling call needs no other geospatial arguments:
+`write_cog()` writes an array as a Cloud-Optimized GeoTIFF to either a local
+path or an S3 `UPath`. A GeoBox from the MGRS guide supplies the spatial part of
+the Rasterio profile:
 
-```{python}
+```python
 import numpy as np
-from rasterio.warp import Resampling, reproject
 
 from freezecore.mgrs import MGRSGeoBox
-
-square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)
-
-dem = np.full(square.shape.yx, np.nan, dtype=np.float32)
-with rasterio_open(dem_path) as src:
-    reproject(
-        source=src.read(1),
-        destination=dem,
-        src_transform=src.transform,
-        src_crs=src.crs,
-        dst_transform=square.transform,
-        dst_crs=square.crs,
-        dst_nodata=np.nan,
-        resampling=Resampling.cubic,
-    )
-
-print(f"{square.mgrs_code}: {dem.shape} px @ {square.resolution.x} m in {square.crs}")
-print(f"elevation: {np.nanmin(dem):.0f} m - {np.nanmax(dem):.0f} m")
-```
-
-The DEM is now a 1000 × 1000 array in EPSG:32632 at exactly 10 m — the same array shape,
-CRS, and transform that every other source resampled onto `32TMS35` will have.
-
-```{python}
-#| fig-cap: "Copernicus DEM GLO-30 resampled onto MGRS grid square 32TMS35 (Fiescher/Aletsch area, Bernese Alps) at 10 m."
-#| warning: false
-import matplotlib.pyplot as plt
-
-left, bottom, right, top = square.boundingbox
-fig, ax = plt.subplots(figsize=(6.5, 5.5))
-im = ax.imshow(dem, cmap="terrain", extent=(left, right, bottom, top))
-fig.colorbar(im, ax=ax, label="elevation (m)", shrink=0.85)
-ax.set_title(f"MGRS {square.mgrs_code}")
-ax.set_xlabel("easting (m)")
-ax.set_ylabel("northing (m)")
-ax.ticklabel_format(style="plain")
-plt.show()
-```
-
-::: {.callout-tip}
-## Pick squares that fit their source tile
-
-GLO-30 tiles are 1° × 1°, and MGRS squares do not respect degree boundaries. `32TMS35`
-happens to sit entirely inside the `N46/E008` tile; a square straddling 8° E would need
-both neighbouring tiles, leaving a nodata stripe if only one is read. `merge_tiffs()`
-handles that case, or read the sources through a `rasterio.vrt.WarpedVRT` mosaic.
-:::
-
-## Writing the result back
-
-`write_cog()` takes the array straight to a Cloud-Optimized GeoTIFF, staging through an
-in-memory file and applying `COG_PROFILE`'s compression and overview settings. Again the
-`GeoBox` supplies the georeferencing:
-
-```{python}
-#| eval: false
 from freezecore.raster import write_cog
 
+square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)
+data = np.zeros(square.shape.yx, dtype=np.float32)
 profile = {
     "dtype": "float32",
     "count": 1,
@@ -165,53 +153,74 @@ profile = {
     "nodata": np.nan,
 }
 
-write_cog(dem, f"dem_{square.mgrs_code}.tif", profile, band_names=["elevation"])
+destination = make_s3_upath(f"s3://my-bucket/dem/{square.mgrs_code}.tif")
+write_cog(data, destination, profile, band_names=["elevation"])
 ```
 
-The destination may equally be an S3 `UPath`, in which case the object is written with a
-single atomic `PutObject`:
-
-```python
-dst = make_s3_upath(f"s3://my-bucket/dem/{square.mgrs_code}.tif", key=..., secret=...)
-write_cog(dem, dst, profile, band_names=["elevation"])
-```
-
-For files that already exist, `rewrite_tiff()` does the same job without loading the array
-yourself — recompressing, retiling, renaming bands, or moving between backends. Source and
-destination credentials are resolved independently, so S3-to-S3 copies across two
-different stores work:
+`rewrite_tiff()` handles existing files. It can recompress or retile them and
+copy between local storage and S3. Source and destination credentials are
+resolved independently, so two S3 paths may refer to different stores:
 
 ```python
 from freezecore.raster import COG_PROFILE, rewrite_tiff
 
-rewrite_tiff("scene.tif", dst, profile=COG_PROFILE)             # local -> S3, as COG
-rewrite_tiff(src_on_store_a, dst_on_store_b, move=True)         # S3 -> S3, then delete
+rewrite_tiff("scene.tif", destination, profile=COG_PROFILE)      # local to S3
+rewrite_tiff(source_on_store_a, destination_on_store_b)          # S3 to S3
+rewrite_tiff("scene.tif", "scene.cog.tif", move=True)           # delete source on success
 ```
 
-## Listing objects
+## Putting S3 and MGRS together
 
-A path from `make_s3_upath()` is an ordinary `UPath`, so the usual filesystem operations
-work on it directly — and under the same credentials the raster reads use:
+The public DEM is in geographic coordinates and does not share the MGRS pixel
+grid. An `MGRSGeoBox` provides the complete destination geometry for
+`rasterio.warp.reproject`:
 
 ```{python}
-bucket = make_s3_upath("s3://copernicus-dem-30m/", anon=True, region="eu-central-1")
-[p.name for p in list(bucket.iterdir())[:3]]
+import numpy as np
+from rasterio import band
+from rasterio.warp import Resampling, reproject
+
+from freezecore.mgrs import MGRSGeoBox
+
+square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)
+dem = np.full(square.shape.yx, np.nan, dtype=np.float32)
+
+with rasterio_open(dem_path) as src:
+    reproject(
+        source=band(src, 1),
+        destination=dem,
+        src_transform=src.transform,
+        src_crs=src.crs,
+        dst_transform=square.transform,
+        dst_crs=square.crs,
+        dst_nodata=np.nan,
+        resampling=Resampling.cubic,
+    )
+
+print(f"{square.mgrs_code}: {dem.shape} pixels in {square.crs}")
+print(f"elevation: {np.nanmin(dem):.0f} m to {np.nanmax(dem):.0f} m")
 ```
 
-`.exists()`, `.stat()`, and `.glob()` behave the same way. This matters more than it
-looks: discovering which tiles exist and then reading them are the two halves of the same
-job, and they run through different libraries (s3fs and GDAL). Because the decision is
-resolved once and stored on the path, a bucket you can list is a bucket you can read.
+Passing `rasterio.band(src, 1)` lets GDAL read the source as needed instead of
+first loading the complete source tile into a NumPy array. The result has the
+same CRS, transform, and shape as every other 10 m layer resampled onto
+`32TMS35`.
 
-## Related helpers
+```{python}
+#| code-fold: true
+#| fig-cap: "Copernicus DEM GLO-30 resampled onto MGRS square 32TMS35 in the Bernese Alps."
+#| warning: false
+import matplotlib.pyplot as plt
 
-`freezecore.raster` carries a few more utilities that come up in the same pipelines:
+left, bottom, right, top = square.boundingbox
+fig, ax = plt.subplots(figsize=(6.5, 5.5))
+image = ax.imshow(dem, cmap="terrain", extent=(left, right, bottom, top))
+fig.colorbar(image, ax=ax, label="elevation (m)", shrink=0.85)
+ax.set_title(f"MGRS {square.mgrs_code}")
+ax.set_xlabel("easting (m)")
+ax.set_ylabel("northing (m)")
+ax.ticklabel_format(style="plain")
+```
 
-| Function | Use |
-|---|---|
-| `merge_tiffs()` | Mosaic several GeoTIFFs, grouping by CRS |
-| `group_tiffs_by_crs()` | Partition a file list by CRS before merging |
-| `build_rasterio_profile()` | Merge profile dicts onto sensible defaults |
-| `get_utm_zone_string()` / `utm_zone_to_crs()` | Convert between UTM zone strings and CRS |
-
-See the [API reference](../reference/index.qmd) for full signatures.
+For complete signatures and the additional mosaic and profile helpers, see the
+[API reference](../reference/index.qmd).
