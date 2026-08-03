@@ -10,6 +10,7 @@ pytest.importorskip("boto3")
 
 from botocore.exceptions import ClientError
 from rasterio.env import getenv
+from upath import UPath
 
 from freezecore.s3 import (
     TRANSIENT_S3_ERROR_CODES,
@@ -60,10 +61,31 @@ class TestMakeS3Upath:
         so = make_s3_upath("s3://b/k", key="a", secret="b", token="TK").storage_options
         assert so["token"] == "TK"
 
-    def test_anonymous_when_no_credentials(self) -> None:
-        so = make_s3_upath("s3://public/k").storage_options
+    def test_signed_by_default_without_credentials(self) -> None:
+        # Matches `s3fs.S3FileSystem(anon=False)`: absent credentials mean
+        # "let boto's resolver find them", not "public bucket".
+        so = make_s3_upath("s3://b/k").storage_options
         assert so["key"] is None
         assert so["secret"] is None
+        assert so["anon"] is False
+
+    def test_signed_by_default_with_credentials(self) -> None:
+        so = make_s3_upath("s3://b/k", key="a", secret="b").storage_options
+        assert so["anon"] is False
+
+    def test_explicit_anon_true(self) -> None:
+        # The flag is what makes a path anonymous, and it must be recorded so
+        # both s3fs and `s3_env` read the same answer.
+        so = make_s3_upath("s3://public/k", anon=True).storage_options
+        assert so["anon"] is True
+
+    @pytest.mark.parametrize(
+        "creds",
+        [{"key": "a"}, {"secret": "b"}, {"token": "TK"}, {"key": "a", "secret": "b"}],
+    )
+    def test_anon_true_with_credentials_rejected(self, creds: dict[str, str]) -> None:
+        with pytest.raises(ValueError, match="anon=True cannot be combined"):
+            make_s3_upath("s3://b/k", anon=True, **creds)
 
     def test_protocol_forced_for_bare_string(self) -> None:
         assert make_s3_upath("bucket/key.tif", key="a", secret="b").protocol == "s3"
@@ -132,13 +154,36 @@ class TestS3Env:
         assert captured_session["region_name"] == "eu-central-1"
         assert captured_session["aws_unsigned"] is False
 
-    def test_session_unsigned_without_credentials(
+    def test_session_unsigned_when_anon(
         self,
         captured_session: dict[str, object],
     ) -> None:
-        p = make_s3_upath("s3://public/k", region="eu-central-1")
+        p = make_s3_upath("s3://public/k", region="eu-central-1", anon=True)
         with s3_env(p):
             pass
         assert captured_session["aws_unsigned"] is True
         # Region still applies for public, region-scoped buckets.
         assert captured_session["region_name"] == "eu-central-1"
+
+    def test_session_signed_without_credentials_by_default(
+        self,
+        captured_session: dict[str, object],
+    ) -> None:
+        # Absent credentials no longer imply anonymous: GDAL signs and lets
+        # boto's resolver supply the credentials, matching s3fs.
+        p = make_s3_upath("s3://b/k")
+        with s3_env(p):
+            pass
+        assert captured_session["aws_unsigned"] is False
+
+    def test_bare_upath_without_anon_defaults_to_signed(
+        self,
+        captured_session: dict[str, object],
+    ) -> None:
+        # A UPath not built by `make_s3_upath` carries no `anon` key; fall back
+        # to the same default s3fs uses rather than inferring from credentials.
+        p = UPath("s3://public/k", protocol="s3")
+        assert "anon" not in p.storage_options
+        with s3_env(p):
+            pass
+        assert captured_session["aws_unsigned"] is False

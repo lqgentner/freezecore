@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## [0.2.0] - 2026-08-03
+
+### Added
+
+- Explicit `anon` argument on `make_s3_upath`, matching the `anon` parameter of
+  `s3fs.S3FileSystem`: `anon=True` uses an anonymous connection (public buckets
+  only); `anon=False` (the default) uses the `key`/`secret` given, or boto's
+  credential resolver. Combining `anon=True` with `key`, `secret`, or `token`
+  raises `ValueError`.
+
+### Changed
+
+- **Breaking:** anonymous S3 access is now opt-in.
+
+  ```python
+  # before
+  path = make_s3_upath("s3://copernicus-dem-30m/x.tif", region="eu-central-1")
+  # after
+  path = make_s3_upath("s3://copernicus-dem-30m/x.tif", region="eu-central-1", anon=True)
+
+### Fixed
+
+- `make_s3_upath` (for s3fs) and `s3_env` (for GDAL) now agree on the
+anonymous/signed decision. Previously, without passing credentials, GDAL read
+unsigned while s3fs signed via boto's resolver.
+
 ## [0.1.0] - 2026-07-27
 
 ### Added
