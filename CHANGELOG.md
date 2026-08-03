@@ -10,17 +10,27 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Added
 
-- `make_s3_upath` takes an `anon` argument, matching the `anon` parameter of
+- Explicit `anon` argument on `make_s3_upath`, matching the `anon` parameter of
   `s3fs.S3FileSystem`: `anon=True` uses an anonymous connection (public buckets
   only); `anon=False` (the default) uses the `key`/`secret` given, or boto's
-  credential resolver (`client_kwargs`, environment variables, config files,
-  EC2 IAM server, in that order).
+  credential resolver. Combining `anon=True` with `key`, `secret`, or `token`
+  raises `ValueError`.
+
+### Changed
+
+- **Breaking:** anonymous S3 access is now opt-in.
+
+  ```python
+  # before
+  path = make_s3_upath("s3://copernicus-dem-30m/x.tif", region="eu-central-1")
+  # after
+  path = make_s3_upath("s3://copernicus-dem-30m/x.tif", region="eu-central-1", anon=True)
 
 ### Fixed
 
-- `make_s3_upath` (for s3fs) and `s3_env` (for GDAL) now agree on the anonymous/signed
-  decision. Previously, without passing credentials, GDAL read unsigned while s3fs
-  signed via boto's resolver.
+- `make_s3_upath` (for s3fs) and `s3_env` (for GDAL) now agree on the
+anonymous/signed decision. Previously, without passing credentials, GDAL read
+unsigned while s3fs signed via boto's resolver.
 
 ## [0.1.0] - 2026-07-27
 
