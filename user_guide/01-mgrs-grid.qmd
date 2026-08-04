@@ -103,7 +103,18 @@ gdf.groupby(["zone", "epsg"]).size()
 ## A square is an odc.geo GeoBox
 
 Indexing or iterating over the grid yields `MGRSGeoBox` objects, a small
-subclass of [`odc.geo.geobox.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html):
+subclass of [`odc.geo.geobox.GeoBox`](https://odc-geo.readthedocs.io/en/latest/intro-geobox.html).
+
+```{python}
+from odc.geo.geobox import GeoBox
+
+square = grid[0]
+
+display(square)
+print(f"Is GeoBox:  {isinstance(square, GeoBox)}")
+```
+
+It combines image width, height, CRS, and an affine transformation to fully define a geo-registered pixel plane:
 
 ```{python}
 from odc.geo.geobox import GeoBox
@@ -117,8 +128,7 @@ print(f"transform:\n{square.transform}")
 print(f"is GeoBox:  {isinstance(square, GeoBox)}")
 ```
 
-That is the complete destination-grid contract expected by raster reprojection
-tools. It also brings along `odc.geo` operations and properties such as native
+It also brings along `odc.geo` operations and properties such as native
 and geographic extents.
 
 Operations that derive a different box—such as padding, slicing, or

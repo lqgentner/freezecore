@@ -14,11 +14,6 @@ and shape. See
 [The MGRS grid](https://lqgentner.github.io/freezecore/user-guide/mgrs-grid.html)
 for the reasoning.
 
-The S3 helpers bridge
-[Universal Pathlib](https://universal-pathlib.readthedocs.io/) and
-[Rasterio](https://rasterio.readthedocs.io/), so filesystem operations and
-GDAL raster I/O use the same per-path credentials and endpoint configuration.
-
 ## Installation
 
 Requires Python 3.12 or newer, and [uv](https://docs.astral.sh/uv/) or pip.
@@ -39,15 +34,10 @@ Pin a release tag for reproducible environments:
 uv add "freezecore @ git+https://github.com/lqgentner/freezecore.git@v0.1.0"
 ```
 
-### The `s3` extra
+S3 support is optional; see [Raster and S3 helpers](#raster-and-s3-helpers)
+below.
 
-If you want to interact with S3-style object storage, install the optional dependencies `s3fs`, `fsspec`, and `boto3` with:
-
-```bash
-uv add "freezecore[s3] @ git+https://github.com/lqgentner/freezecore.git"
-```
-
-## Quick start
+## MGRS quick start
 
 Build the 10 km grid covering an area of interest:
 
@@ -72,46 +62,73 @@ from freezecore.mgrs import MGRSGeoBox
 square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)  # 1000 x 1000 px, EPSG:32632
 ```
 
-Read a raster from local disk or S3 through one call:
+## Raster and S3 helpers
+
+The raster helpers use [Rasterio](https://rasterio.readthedocs.io/) for local
+I/O. For object storage, freezecore bridges Rasterio/GDAL with
+[Universal Pathlib](https://universal-pathlib.readthedocs.io/), so filesystem
+operations and raster I/O use the same per-path credentials and endpoint
+configuration.
+
+Rewrite a local GeoTIFF as a Cloud-Optimized GeoTIFF:
+
+```python
+from freezecore.raster import COG_PROFILE, rewrite_tiff
+
+rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE)             # copy
+rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)  # move
+```
+
+### The `s3` extra
+
+S3 support needs the optional `s3fs`, `fsspec`, and `boto3` dependencies:
+
+```bash
+uv add "freezecore[s3] @ git+https://github.com/lqgentner/freezecore.git"
+```
+
+Credentials and endpoint configuration travel with each path. Named profiles
+make it possible to select different stores without attaching raw credential
+values:
+
+```python
+from freezecore.s3 import make_s3_upath
+
+aws_path = make_s3_upath("s3://aws-bucket/data", profile="research")
+ceph_path = make_s3_upath(
+    "s3://ceph-bucket/data",
+    profile="ceph-research",
+    endpoint_url="https://objects.example.org",
+)
+```
+
+An explicitly selected profile also prevents boto from falling back to ambient
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values from the shell.
+
+The same configured path works for pathlib-style discovery and Rasterio reads:
 
 ```python
 from freezecore.raster import rasterio_open
-from freezecore.s3 import make_s3_upath
 
-path = make_s3_upath("s3://my-bucket/scene.tif", key=..., secret=...)
-with rasterio_open(path) as src:
-    data = src.read(1)
+scene = aws_path / "scene.tif"
+if scene.exists():
+    with rasterio_open(scene) as src:
+        data = src.read(1)
 ```
 
-The credentials travel with the path, so pathlib-like methods (`exists()`, `iterdir()`, `glob()`) and GDAL (the
-raster reader) always agree on them. Public buckets need `anon=True`:
+Public buckets use `anon=True`. See [Rasters on
+S3](https://lqgentner.github.io/freezecore/user-guide/rasters-on-s3.html) for
+authentication patterns, custom endpoints, and S3-to-S3 copies.
 
-```python
-tile = "Copernicus_DSM_COG_10_N46_00_E008_00_DEM"
-dem_path = make_s3_upath(
-    f"s3://copernicus-dem-30m/{tile}/{tile}.tif",
-    anon=True,
-    region="eu-central-1",
-)
+## Other helpers
 
-```
-
-Download a file to a local directory or a bucket, with a progress bar:
+Download a file with retries and a progress bar:
 
 ```python
 from freezecore.download import HTTPDownloader
 
 download = HTTPDownloader(auth=("user", "pass"))
 path = download("https://example.org/data.zip", "cache/")  # -> Path
-```
-
-Rewrite a GeoTIFF as a Cloud-Optimized GeoTIFF (local or S3):
-
-```python
-from freezecore.raster import COG_PROFILE, rewrite_tiff
-
-rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE)              # copy by default
-rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)   # move
 ```
 
 ## Documentation

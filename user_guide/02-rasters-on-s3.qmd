@@ -13,9 +13,9 @@ warnings.filterwarnings("ignore")
 freezecore connects two libraries that normally see object storage
 independently: [Universal Pathlib](https://universal-pathlib.readthedocs.io/)
 provides pathlib-style S3 paths through `UPath`, while
-[Rasterio](https://rasterio.readthedocs.io/) and GDAL perform the raster I/O.
-One configured path supplies the same authentication and endpoint settings to
-both layers.
+[Rasterio](https://rasterio.readthedocs.io/) performs the raster I/O.
+freezecore enables both layers to use the same per-path authentication and endpoint
+configuration.
 
 ## The two-client problem
 
@@ -33,8 +33,8 @@ Rasterio environment for the duration of its `with` block:
 from freezecore.raster import rasterio_open
 from freezecore.s3 import make_s3_upath
 
-# With no explicit key pair, both layers use the normal boto credential chain.
-path = make_s3_upath("s3://my-bucket/scene.tif")
+# The named profile travels with this path and all paths derived from it.
+path = make_s3_upath("s3://my-bucket/scene.tif", profile="research")
 with rasterio_open(path) as src:
     data = src.read(1)
 ```
@@ -58,13 +58,50 @@ the base installation.
 
 ## Authentication patterns
 
-Signed access uses boto's normal credential resolver when no credentials are
-passed. This is the preferred choice for AWS profiles, environment variables,
-and workload roles:
+Credentials and endpoint configuration travel with each S3 path. Paths can
+select different named AWS profiles, including profiles used with custom
+S3-compatible endpoints:
 
 ```python
-private = make_s3_upath("s3://private-bucket/scene.tif")
+from freezecore.s3 import make_s3_upath
+
+aws_path = make_s3_upath("s3://aws-bucket/data", profile="research")
+ceph_path = make_s3_upath(
+    "s3://ceph-bucket/data",
+    profile="ceph-research",
+    endpoint_url="https://objects.example.org",
+)
 ```
+
+The profile name—not its credentials—is stored on the path and inherited by
+child paths. s3fs and Rasterio independently load that same profile when they
+access the object store.
+
+Selecting a profile explicitly also makes boto skip its environment-variable
+credential provider. A profiled path is therefore never signed by whatever
+`AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` happens to be set in the shell.
+Besides making multiple stores usable in one process, this prevents ambient
+credentials intended for one service from being sent to another.
+
+Explicit credentials and temporary session tokens are also supported. This is
+useful when credentials come from an application-specific secret store rather
+than an AWS configuration file:
+
+```python
+custom = make_s3_upath(
+    "s3://imagery/scene.tif",
+    key=...,
+    secret=...,
+    token=...,  # optional STS/session token
+    endpoint_url="https://objects.example.org",
+    region="eu-central-1",
+)
+```
+
+When neither a profile nor explicit credentials are attached, both layers fall
+back to boto's standard credential chain. This supports environment variables
+and workload roles, but the selected identity is no longer explicit on the
+path.
 
 Public buckets require explicit anonymous access:
 
@@ -72,30 +109,17 @@ Public buckets require explicit anonymous access:
 public = make_s3_upath("s3://public-bucket/scene.tif", anon=True)
 ```
 
-Explicit credentials, temporary session tokens, regions, and custom endpoints
-are supported for S3-compatible storage:
-
-```python
-custom = make_s3_upath(
-    "s3://imagery/scene.tif",
-    key=...,
-    secret=...,
-    token=...,                 # optional STS/session token
-    endpoint_url="https://objects.example.org",
-    region="eu-central-1",
-)
-```
-
-`anon=True` cannot be combined with credentials. The helper also configures
-retries for both the s3fs/botocore and GDAL paths, plus checksum defaults that
-avoid trailers rejected by some S3-compatible gateways.
+Profiles, explicit credentials, and anonymous access are mutually exclusive.
+The helper also configures retries for both the s3fs/botocore and GDAL paths,
+plus checksum defaults that avoid trailers rejected by some S3-compatible
+gateways.
 
 ::: {.callout-warning}
 ## Treat configured paths as sensitive
 
-Explicit credentials are stored in the `UPath`'s `storage_options`. Do not log,
-publish, or serialize those options. Prefer the boto credential chain or
-short-lived workload credentials where possible.
+Explicit `key`, `secret`, and `token` values are stored in the `UPath`'s
+`storage_options`. Do not log, publish, or serialize those options. A named
+profile avoids storing the credential values on the path.
 :::
 
 ## Read a public raster
@@ -114,9 +138,10 @@ dem_path = make_s3_upath(
     anon=True,
     region="eu-central-1",
 )
-
-print(f"exists: {dem_path.exists()}")  # s3fs
-with rasterio_open(dem_path) as src:   # GDAL
+# s3fs
+print(f"exists:    {dem_path.exists()}")
+# GDAL
+with rasterio_open(dem_path) as src:
     print(f"driver:    {src.driver}")
     print(f"crs:       {src.crs}")
     print(f"shape:     {src.shape}")
@@ -164,9 +189,12 @@ resolved independently, so two S3 paths may refer to different stores:
 ```python
 from freezecore.raster import COG_PROFILE, rewrite_tiff
 
-rewrite_tiff("scene.tif", destination, profile=COG_PROFILE)      # local to S3
-rewrite_tiff(source_on_store_a, destination_on_store_b)          # S3 to S3
-rewrite_tiff("scene.tif", "scene.cog.tif", move=True)           # delete source on success
+# local to S3
+rewrite_tiff("scene.tif", destination, profile=COG_PROFILE)
+# S3 to S3
+rewrite_tiff(source_on_store_a, destination_on_store_b)
+
+rewrite_tiff("scene.tif", "scene.cog.tif", move=True)
 ```
 
 ## Putting S3 and MGRS together
@@ -216,9 +244,7 @@ left, bottom, right, top = square.boundingbox
 fig, ax = plt.subplots(figsize=(6.5, 5.5))
 image = ax.imshow(dem, cmap="terrain", extent=(left, right, bottom, top))
 fig.colorbar(image, ax=ax, label="elevation (m)", shrink=0.85)
-ax.set_title(f"MGRS {square.mgrs_code}")
-ax.set_xlabel("easting (m)")
-ax.set_ylabel("northing (m)")
+ax.set(title=f"MGRS {square.mgrs_code}", xlabel="easting (m)", ylabel="northing (m)")
 ax.ticklabel_format(style="plain")
 ```
 
