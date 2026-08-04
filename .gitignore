@@ -35,10 +35,13 @@ MANIFEST
 
 # Tools
 .mypy_cache/
-.dmypy.json
-dmypy.json
+.dmypy*.json
+dmypy*.json
 .ruff_cache/
 .claude/
+
+# Documentation
+great-docs/
 
 # Unit test / coverage reports
 htmlcov/

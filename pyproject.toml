@@ -1,6 +1,6 @@
 [project]
 name = "freezecore"
-description = "Shared geospatial core utilities: MGRS grid, raster/S3 helpers, HTTP download tooling."
+description = "Lightweight geospatial helpers for reproducible MGRS grids and S3-backed raster workflows."
 authors = [
   { name = "Luis Gentner" , email = "luis.gentner@geo.uzh.ch"},
 ]
@@ -78,6 +78,14 @@ dev = [
     "ruff>=0.6",
     "types-geopandas>=1.0",
     "types-requests>=2.31",
+]
+# Documentation toolchain. `great-docs` renders the site via Quarto (which must
+# be installed separately, see user_guide/). The plotting stack is only needed
+# because the user guide executes its figures at build time.
+docs = [
+    "great-docs>=0.16",
+    "matplotlib>=3.9",
+    "contextily>=1.6",
 ]
 
 [build-system]

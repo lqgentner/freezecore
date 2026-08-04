@@ -259,7 +259,7 @@ class MGRSGeoBox(GeoBox):
         ------
         ValueError
             If ``resolution`` is not positive, does not evenly divide the 10 km
-            cell, or ``mgrs_code`` is not a 10 km reference (two location
+            grid square, or ``mgrs_code`` is not a 10 km reference (two location
             digits, e.g. ``"32TMT64"``).
         """
         if resolution <= 0:
@@ -420,7 +420,48 @@ _MGRS_PRECISION_10KM = 1
 
 
 class MGRSGrid:
-    """MGRS grid squares at 10 km resolution."""
+    """The 10 km MGRS grid squares covering an area of interest.
+
+    A grid *specification* rather than a dataset: it stores no pixels, only the
+    rule that maps each MGRS reference to exactly one CRS, affine transform, and
+    array shape. Resampling two sources onto the same grid square makes them
+    co-registered by construction.
+
+    Squares are 10 x 10 km and tile their UTM zone without overlap, so unlike the
+    Sentinel-2 tiling each location is stored once. Squares from *neighbouring*
+    UTM zones can still overlap near a zone boundary, since each zone's grid is
+    built independently.
+
+    Indexing with an integer yields an :class:`MGRSGeoBox`; slicing yields a new
+    ``MGRSGrid``. Iterating yields every grid square in turn.
+
+    Parameters
+    ----------
+    filter_geometry : GeoSeries | GeoArray | BaseGeometry
+        Area of interest in WGS84 (EPSG:4326). Every grid square intersecting it
+        is included, whole. Accepts a single shapely geometry, an array of
+        geometries, a ``GeoSeries``, or a ``GeoDataFrame``.
+    resolution : float, default 10.0
+        Pixel size in metres for the ``MGRSGeoBox`` instances this grid yields.
+        Must divide 10 km evenly, so a square is a whole number of pixels
+        (10.0 m gives 1000 x 1000). Does not affect which squares are selected.
+
+    Raises
+    ------
+    ValueError
+        If ``filter_geometry`` carries a CRS other than WGS84.
+
+    See Also
+    --------
+    MGRSGeoBox.from_mgrs : Build a single grid square from its MGRS reference.
+
+    Examples
+    --------
+    >>> from shapely import box
+    >>> grid = MGRSGrid(box(8.4, 47.3, 8.6, 47.5))  # Zürich
+    >>> grid[0].mgrs_code  # doctest: +SKIP
+    '32TMT97'
+    """
 
     def __init__(
         self,
@@ -658,12 +699,15 @@ class MGRSGrid:
     def to_geodataframe(
         self,
     ) -> gpd.GeoDataFrame:
-        """Build a GeoDataFrame from filtered arrays in WGS84.
+        """Build a GeoDataFrame of the grid squares in WGS84.
 
         Returns
         -------
         gpd.GeoDataFrame
-            GeoDataFrame in WGS84 with standard columns.
+            One row per grid square, in WGS84, with columns ``mgrs_code``,
+            ``zone``, ``hemisphere``, ``easting``, ``northing``, ``epsg``, and
+            ``geometry``. The ``epsg`` column holds more than one value when the
+            grid spans a UTM zone boundary.
         """
         return gpd.GeoDataFrame(
             {

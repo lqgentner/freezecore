@@ -1,0 +1,147 @@
+# Great Docs Configuration
+# See https://posit-dev.github.io/great-docs/user-guide/configuration.html
+
+display_name: freezecore
+parser: numpy
+dynamic: false
+# Not published on PyPI -- it is installed straight from GitHub
+pypi: false
+
+# GitHub Integration
+# ------------------
+repo: https://github.com/lqgentner/freezecore
+site_url: "https://lqgentner.github.io/freezecore/"
+
+source:
+  enabled: true
+  branch: main
+  placement: usage
+
+
+# Author Information
+# ------------------
+authors:
+  - name: Luis Gentner
+    role: Author
+    email: luis.gentner@geo.uzh.ch
+    github: lqgentner
+
+# Logo & Favicon
+# --------------
+logo:
+  light: assets/logo.png
+  dark: assets/logo-dark.png
+
+favicon: assets/favicon.png
+
+hero:
+  name: false
+
+# SEO
+# ---
+# Quarto already writes correct <title>s ("freezecore" on the homepage,
+# "The MGRS grid – freezecore" elsewhere). Great Docs' post-render step then
+# appends "| {site_name}" on top, producing "freezecore | freezecore", because
+# its "already templated?" guard tests for an ASCII " - " while Quarto joins
+# with an en dash (U+2013). Emitting just the page title suppresses the second
+# append. Revisit if great-docs > 0.16.0 fixes post-render.py:430.
+seo:
+  title_template: "{page_title}"
+
+# Theming
+# -------
+content_style: mint
+navbar_style: mint
+
+# Icons
+# -----
+nav_icons:
+  sidebar:
+    The MGRS grid: globe
+    Rasters on S3: box
+    Contributing: wrench
+
+# API Reference Structure
+# -----------------------
+reference:
+  title: "API Reference"
+  desc: >-
+    Every public symbol in freezecore, grouped by the module that defines it.
+  sections:
+    - title: MGRS grid
+      desc: >-
+        10 km MGRS grid squares to align raster data onto one common grid.
+      contents:
+        - mgrs.MGRSGrid
+        - mgrs.MGRSGeoBox
+        - mgrs.UTMZones
+        - mgrs.mgrs_to_crs
+        - mgrs.utm_to_crs
+        - mgrs.utms_to_epsgs
+        - mgrs.transform_shapely
+
+    - title: Raster I/O
+      desc: >-
+        rasterio helpers that accept local paths and `s3://` URIs via UPath.
+      contents:
+        - raster.rasterio_open
+        - raster.rewrite_tiff
+        - raster.write_cog
+        - raster.merge_tiffs
+        - raster.build_rasterio_profile
+        - raster.group_tiffs_by_crs
+        - raster.get_utm_zone_string
+        - raster.get_epsg_string
+        - raster.utm_zone_to_crs
+        - raster.COG_PROFILE
+        - raster.RASTERIO_PROFILE_DEFAULTS
+
+    - title: VRT generation
+      desc: Build VRT files without the Python GDAL dependency
+      contents:
+        - vrt.create_decibel_vrt
+        - vrt.create_rgb_vrt
+        - vrt.build_vrt_mosaic
+
+    - title: Downloads
+      desc: HTTP downloads with UPath destinations
+      contents:
+        - download.HTTPDownloader
+        - download.retry_request
+
+    - title: S3
+      desc: >-
+        S3 `UPath` construction and retry configuration
+      contents:
+        - s3.make_s3_upath
+        - s3.s3_env
+
+    - title: Vector data
+      desc: Cached vector datasets and GeoDataFrame helpers
+      contents:
+        - vectordata.GeoVectorData
+        - vectordata.DatasetMetadata
+        - vectools.save_and_read_parquet
+        - vectools.drop_z_if_zero
+        - vectools.is_z_axis_zero
+        - vectools.simplify_multipolygons
+
+    - title: Utilities
+      desc: Shared helpers used across the package
+      contents:
+        - set_loglevel
+        - utils.get_cache_dir
+        - utils.get_data_dir
+        - utils.get_credentials_from_env
+        - utils.depends_on_optional
+        - utils.file_sha256
+        - utils.shorten_string
+        - utils.format_valid_options
+        - pandas_utils.clean_names
+        - progress.create_progress
+        - progress.track_progress
+
+# Jupyter Kernel
+# --------------
+# Used to execute the `{python}` chunks in the user guide.
+jupyter: python3
