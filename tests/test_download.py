@@ -1,4 +1,4 @@
-"""Tests for freezecore.download: filename confinement and redirect credential safety."""
+"""Tests for freezebase.download: filename confinement and redirect credential safety."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 import requests
 from requests.structures import CaseInsensitiveDict
 
-from freezecore.download import (
+from freezebase.download import (
     MAX_REDIRECTS,
     HTTPDownloader,
     _extract_filename_from_cd,

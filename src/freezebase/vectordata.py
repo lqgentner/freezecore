@@ -10,9 +10,9 @@ import weakref
 import geopandas as gpd
 import pandas as pd
 
-from freezecore.download import HTTPDownloader
-from freezecore.utils import file_sha256, get_cache_dir
-from freezecore.vectools import save_and_read_parquet
+from freezebase.download import HTTPDownloader
+from freezebase.utils import file_sha256, get_cache_dir
+from freezebase.vectools import save_and_read_parquet
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class GeoVectorData(ABC):
         Parameters
         ----------
         cache_dir : str or Path or None, default: None
-            The root directory where the dataset is stored. Defaults to the 'FREEZECORE_CACHE'
+            The root directory where the dataset is stored. Defaults to the 'FREEZEBASE_CACHE'
             environment variable or the system cache directory (in that order).
 
         """

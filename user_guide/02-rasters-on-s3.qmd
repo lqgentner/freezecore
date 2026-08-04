@@ -10,11 +10,11 @@ import warnings
 warnings.filterwarnings("ignore")
 ```
 
-freezecore connects two libraries that normally see object storage
+freezebase connects two libraries that normally see object storage
 independently: [Universal Pathlib](https://universal-pathlib.readthedocs.io/)
 provides pathlib-style S3 paths through `UPath`, while
 [Rasterio](https://rasterio.readthedocs.io/) performs the raster I/O.
-freezecore enables both layers to use the same per-path authentication and endpoint
+freezebase enables both layers to use the same per-path authentication and endpoint
 configuration.
 
 ## The two-client problem
@@ -30,8 +30,8 @@ read them through s3fs, while `rasterio_open()` translates them into a scoped
 Rasterio environment for the duration of its `with` block:
 
 ```python
-from freezecore.raster import rasterio_open
-from freezecore.s3 import make_s3_upath
+from freezebase.raster import rasterio_open
+from freezebase.s3 import make_s3_upath
 
 # The named profile travels with this path and all paths derived from it.
 path = make_s3_upath("s3://my-bucket/scene.tif", profile="research")
@@ -49,7 +49,7 @@ configuration. The wrapper deliberately supports local and S3 paths; other
 The S3 integration requires s3fs, fsspec, and boto3:
 
 ```bash
-pip install "freezecore[s3] @ git+https://github.com/lqgentner/freezecore.git"
+pip install "freezebase[s3] @ git+https://github.com/lqgentner/freezebase.git"
 ```
 
 These dependencies are imported lazily, so local raster operations work with
@@ -63,7 +63,7 @@ select different named AWS profiles, including profiles used with custom
 S3-compatible endpoints:
 
 ```python
-from freezecore.s3 import make_s3_upath
+from freezebase.s3 import make_s3_upath
 
 aws_path = make_s3_upath("s3://aws-bucket/data", profile="research")
 ceph_path = make_s3_upath(
@@ -129,8 +129,8 @@ public collection of Cloud-Optimized GeoTIFFs. The same configured path can be
 inspected through Universal Pathlib and opened through Rasterio:
 
 ```{python}
-from freezecore.raster import rasterio_open
-from freezecore.s3 import make_s3_upath
+from freezebase.raster import rasterio_open
+from freezebase.s3 import make_s3_upath
 
 tile = "Copernicus_DSM_COG_10_N46_00_E008_00_DEM"
 dem_path = make_s3_upath(
@@ -163,8 +163,8 @@ the Rasterio profile:
 ```python
 import numpy as np
 
-from freezecore.mgrs import MGRSGeoBox
-from freezecore.raster import write_cog
+from freezebase.mgrs import MGRSGeoBox
+from freezebase.raster import write_cog
 
 square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)
 data = np.zeros(square.shape.yx, dtype=np.float32)
@@ -187,7 +187,7 @@ copy between local storage and S3. Source and destination credentials are
 resolved independently, so two S3 paths may refer to different stores:
 
 ```python
-from freezecore.raster import COG_PROFILE, rewrite_tiff
+from freezebase.raster import COG_PROFILE, rewrite_tiff
 
 # local to S3
 rewrite_tiff("scene.tif", destination, profile=COG_PROFILE)
@@ -208,7 +208,7 @@ import numpy as np
 from rasterio import band
 from rasterio.warp import Resampling, reproject
 
-from freezecore.mgrs import MGRSGeoBox
+from freezebase.mgrs import MGRSGeoBox
 
 square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)
 dem = np.full(square.shape.yx, np.nan, dtype=np.float32)

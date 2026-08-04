@@ -22,7 +22,7 @@ from rasterio.session import AWSSession
 from s3fs.core import set_custom_error_handler
 from upath import UPath
 
-from freezecore.download import TRANSIENT_HTTP_STATUS_CODES
+from freezebase.download import TRANSIENT_HTTP_STATUS_CODES
 
 if TYPE_CHECKING:
     from collections.abc import Generator

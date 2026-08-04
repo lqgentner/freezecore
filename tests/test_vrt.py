@@ -1,4 +1,4 @@
-"""Tests for freezecore.vrt VRT generation."""
+"""Tests for freezebase.vrt VRT generation."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from freezecore.vrt import build_vrt_mosaic, create_decibel_vrt, create_rgb_vrt
+from freezebase.vrt import build_vrt_mosaic, create_decibel_vrt, create_rgb_vrt
 
 WIDTH, HEIGHT = 6, 4
 

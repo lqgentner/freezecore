@@ -39,7 +39,7 @@ pixel represents a fixed 10 m grid spacing rather than a varying fraction of a
 degree.
 
 **Sentinel-2 uses the same reference system.** A Sentinel-2 tile such as
-`T32TMS` corresponds to a 100 km MGRS square; a freezecore code such as
+`T32TMS` corresponds to a 100 km MGRS square; a freezebase code such as
 `32TMS35` identifies one of its 10 km subdivisions. This makes the parent
 Sentinel-2 tile directly identifiable. Compatible 10 m data can be retiled
 without introducing an additional grid shift.
@@ -50,7 +50,7 @@ square contains 10,000 × 10,000 pixels, while a 10 km square contains
 process only the squares touched by scattered areas of interest.
 
 **Cells do not overlap within one UTM grid.** Unlike Sentinel-2 product tiles,
-which include wasteful overlap around their 100 km reference squares[^1], freezecore cells step by exactly 10 km. Adjacent UTM zones are separate grids and can overlap; that limitation is described below.
+which include wasteful overlap around their 100 km reference squares[^1], freezebase cells step by exactly 10 km. Adjacent UTM zones are separate grids and can overlap; that limitation is described below.
 
 [^1]: Bauer-Marschallinger, B., & Falkner, K. (2023). Wasting petabytes: A
 survey of the Sentinel-2 UTM tiling grid and its spatial overhead. *ISPRS
@@ -65,7 +65,7 @@ boundary between UTM zones 31 and 32:
 ```{python}
 from shapely import box
 
-from freezecore.mgrs import MGRSGrid
+from freezebase.mgrs import MGRSGrid
 
 aoi = box(5.8, 46.0, 6.5, 46.4)  # Geneva region; bare Shapely means WGS84 here
 grid = MGRSGrid(aoi)
@@ -142,7 +142,7 @@ When a code is already stored in a filename, database, or job description, the
 AOI does not need to be processed again:
 
 ```{python}
-from freezecore.mgrs import MGRSGeoBox, mgrs_to_crs
+from freezebase.mgrs import MGRSGeoBox, mgrs_to_crs
 
 square = MGRSGeoBox.from_mgrs("32TMS35", resolution=10.0)
 print(square)
@@ -164,7 +164,7 @@ for resolution in (10.0, 20.0, 100.0):
 
 ## Geographic limits and zone boundaries
 
-freezecore implements the UTM portion of MGRS: 80° S to 84° N. It does not
+freezebase implements the UTM portion of MGRS: 80° S to 84° N. It does not
 implement the polar UPS grids, so it does not cover every
 location on Earth.
 

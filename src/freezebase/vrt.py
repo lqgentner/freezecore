@@ -8,7 +8,7 @@ from xml.etree import ElementTree as ET
 
 from upath import UPath
 
-from freezecore.raster import rasterio_open
+from freezebase.raster import rasterio_open
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

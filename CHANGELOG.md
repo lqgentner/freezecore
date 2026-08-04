@@ -17,6 +17,10 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
 
 ### Changed
 
+- Renamed the package to `freezebase`, to allow publication on
+  PyPI under the same name. The import path, PyPI distribution name,
+  `FREEZEBASE_CACHE`/`FREEZEBASE_DATA` environment variables, and the GitHub
+  repository all changed accordingly; there is no compatibility shim for the old names.
 - `make_s3_upath` rejects credentials in `client_kwargs`, which reach s3fs but
   not `s3_env`.
 
@@ -52,15 +56,15 @@ unsigned while s3fs signed via boto's resolver.
 
 - `py.typed` marker so downstream type checkers use the inline annotations.
 - Optional `DatasetMetadata.sha256` to verify a raw download against a known
-  hash (`freezecore.vectordata`).
-- `freezecore.utils.file_sha256` helper.
+  hash (`freezebase.vectordata`).
+- `freezebase.utils.file_sha256` helper.
 - Packaging metadata: project URLs, keywords, and classifiers.
 - GitHub Actions CI (lint, type-check, test matrix on 3.12/3.13, a
   lowest-bound dependency job, a MinIO-backed S3 integration job, and a build +
   wheel smoke-test) and a Trusted-Publishing release workflow.
 - S3 integration tests (`tests/test_s3_integration.py`, `integration` marker),
-  skipped unless `FREEZECORE_TEST_S3_*` is set.
-- `freezecore.s3.s3_env`, a rasterio context manager that configures
+  skipped unless `FREEZEBASE_TEST_S3_*` is set.
+- `freezebase.s3.s3_env`, a rasterio context manager that configures
   credentials and endpoint for S3-compatible object storage from a `UPath`'s
   storage options. Usable with `rasterio` or `rioxarray`.
 - `rewrite_tiff` can now copy between two different S3 backends (e.g. an
@@ -73,7 +77,7 @@ unsigned while s3fs signed via boto's resolver.
 - **Breaking:** `make_s3_upath` renamed its first parameter `root` → `path` and
   gained optional `token` and `region`; `key`/`secret` are now optional so it
   can build paths for anonymous (unsigned) access to public buckets.
-- S3 rasterio setup consolidated into `freezecore.s3` and is now rasterio-only:
+- S3 rasterio setup consolidated into `freezebase.s3` and is now rasterio-only:
   the optional GDAL helper were removed
 - Dependency lower bounds corrected to the oldest versions that actually
   install and work on Python 3.12: notably `numpy>=2.0` (code uses `np.concat`),

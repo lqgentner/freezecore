@@ -1,16 +1,16 @@
 """S3 integration tests against a live S3-compatible service (e.g. MinIO).
 
-These exercise the credentialed :func:`freezecore.s3.s3_env` read/write paths
-used by ``freezecore.raster`` that unit tests can't reach. They are skipped unless the
-``FREEZECORE_TEST_S3_*`` environment variables point at a reachable endpoint;
+These exercise the credentialed :func:`freezebase.s3.s3_env` read/write paths
+used by ``freezebase.raster`` that unit tests can't reach. They are skipped unless the
+``FREEZEBASE_TEST_S3_*`` environment variables point at a reachable endpoint;
 CI provides them via a MinIO service container.
 
 Configure with:
 
-- ``FREEZECORE_TEST_S3_ENDPOINT``  (e.g. ``http://localhost:9000``)
-- ``FREEZECORE_TEST_S3_KEY``
-- ``FREEZECORE_TEST_S3_SECRET``
-- ``FREEZECORE_TEST_S3_BUCKET``    (optional, default ``freezecore-test``)
+- ``FREEZEBASE_TEST_S3_ENDPOINT``  (e.g. ``http://localhost:9000``)
+- ``FREEZEBASE_TEST_S3_KEY``
+- ``FREEZEBASE_TEST_S3_SECRET``
+- ``FREEZEBASE_TEST_S3_BUCKET``    (optional, default ``freezebase-test``)
 """
 
 from __future__ import annotations
@@ -31,22 +31,22 @@ if TYPE_CHECKING:
 
     from upath import UPath
 
-from freezecore.raster import (
+from freezebase.raster import (
     COG_PROFILE,
     rasterio_open,
     rewrite_tiff,
     write_cog,
 )
-from freezecore.s3 import make_s3_upath
+from freezebase.s3 import make_s3_upath
 
-_ENDPOINT = os.getenv("FREEZECORE_TEST_S3_ENDPOINT")
-_KEY = os.getenv("FREEZECORE_TEST_S3_KEY")
-_SECRET = os.getenv("FREEZECORE_TEST_S3_SECRET")
-_BUCKET = os.getenv("FREEZECORE_TEST_S3_BUCKET", "freezecore-test")
+_ENDPOINT = os.getenv("FREEZEBASE_TEST_S3_ENDPOINT")
+_KEY = os.getenv("FREEZEBASE_TEST_S3_KEY")
+_SECRET = os.getenv("FREEZEBASE_TEST_S3_SECRET")
+_BUCKET = os.getenv("FREEZEBASE_TEST_S3_BUCKET", "freezebase-test")
 # Name of the throwaway shared-credentials profile written by ``s3_profile_key``.
-_AWS_PROFILE = "freezecore-integration"
+_AWS_PROFILE = "freezebase-integration"
 
-_skip_reason = "FREEZECORE_TEST_S3_ENDPOINT/KEY/SECRET not set"
+_skip_reason = "FREEZEBASE_TEST_S3_ENDPOINT/KEY/SECRET not set"
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not (_ENDPOINT and _KEY and _SECRET), reason=_skip_reason),

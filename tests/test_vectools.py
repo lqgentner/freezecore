@@ -1,4 +1,4 @@
-"""Tests for freezecore.vectools module."""
+"""Tests for freezebase.vectools module."""
 
 from pathlib import Path
 import tempfile
@@ -7,7 +7,7 @@ import geopandas as gpd
 import pytest
 import shapely
 
-from freezecore.vectools import (
+from freezebase.vectools import (
     drop_z_if_zero,
     is_z_axis_zero,
     save_and_read_parquet,

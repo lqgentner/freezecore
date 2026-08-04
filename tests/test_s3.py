@@ -1,4 +1,4 @@
-"""Tests for freezecore.s3 UPath construction, env injection, and retries."""
+"""Tests for freezebase.s3 UPath construction, env injection, and retries."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 from rasterio.env import getenv
 from upath import UPath
 
-from freezecore.s3 import (
+from freezebase.s3 import (
     TRANSIENT_S3_ERROR_CODES,
     _retry_transient_s3_errors,
     make_s3_upath,
@@ -144,7 +144,7 @@ class TestMakeS3Upath:
 
 @pytest.fixture
 def captured_session(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    """Patch ``AWSSession`` in :mod:`freezecore.s3` to record its kwargs."""
+    """Patch ``AWSSession`` in :mod:`freezebase.s3` to record its kwargs."""
     import inspect  # noqa: PLC0415
 
     from rasterio.session import AWSSession  # noqa: PLC0415
@@ -160,7 +160,7 @@ def captured_session(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
         inspect.signature(AWSSession).bind(**kwargs)
         return AWSSession(aws_unsigned=True)
 
-    monkeypatch.setattr("freezecore.s3.AWSSession", spy)
+    monkeypatch.setattr("freezebase.s3.AWSSession", spy)
     return captured
 
 

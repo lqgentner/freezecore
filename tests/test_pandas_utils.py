@@ -1,11 +1,11 @@
-"""Tests for freezecore.pandas_utils.clean_names."""
+"""Tests for freezebase.pandas_utils.clean_names."""
 
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-from freezecore.pandas_utils import clean_names
+from freezebase.pandas_utils import clean_names
 
 
 class TestCleanNames:

@@ -852,7 +852,7 @@ wheels = [
 ]
 
 [[package]]
-name = "freezecore"
+name = "freezebase"
 source = { editable = "." }
 dependencies = [
     { name = "affine" },

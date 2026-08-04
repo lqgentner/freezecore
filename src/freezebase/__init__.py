@@ -1,4 +1,4 @@
-"""Initialize the freezecore module."""
+"""Initialize the freezebase module."""
 
 import functools
 import logging
@@ -24,7 +24,7 @@ def set_loglevel(
     level: Literal["notset", "debug", "info", "warning", "error", "critical"],
 ) -> None:
     """
-    Configure freezecore's logging levels.
+    Configure freezebase's logging levels.
 
     Call `set_loglevel("info")` or `set_loglevel("debug")` to get additional debugging information.
 

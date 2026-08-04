@@ -1,5 +1,5 @@
 [project]
-name = "freezecore"
+name = "freezebase"
 description = "Lightweight geospatial helpers for reproducible MGRS grids and S3-backed raster workflows."
 authors = [
   { name = "Luis Gentner" , email = "luis.gentner@geo.uzh.ch"},
@@ -61,10 +61,10 @@ s3 = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/lqgentner/freezecore"
-Repository = "https://github.com/lqgentner/freezecore"
-Issues = "https://github.com/lqgentner/freezecore/issues"
-Changelog = "https://github.com/lqgentner/freezecore/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/lqgentner/freezebase"
+Repository = "https://github.com/lqgentner/freezebase"
+Issues = "https://github.com/lqgentner/freezebase/issues"
+Changelog = "https://github.com/lqgentner/freezebase/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 # Dev tools carry lower bounds too, so `uv sync --resolution lowest-direct`
@@ -96,14 +96,14 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/freezecore"]
+packages = ["src/freezebase"]
 
 # Ship a lean, reproducible sdist: the package sources, the test suite (so
 # downstreams can run it), and the project/license/readme metadata -- but not
 # local developer scaffolding (`.python-version`, `.gitignore`, `uv.lock`).
 [tool.hatch.build.targets.sdist]
 include = [
-    "src/freezecore",
+    "src/freezebase",
     "tests",
     "README.md",
     "LICENSE",
@@ -207,7 +207,7 @@ suppress-dummy-args = false
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["freezecore"]
+known-first-party = ["freezebase"]
 force-sort-within-sections = true
 
 [tool.pytest.ini_options]
@@ -216,7 +216,7 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 markers = [
-    "integration: tests requiring a live S3-compatible service (MinIO); configured via FREEZECORE_TEST_S3_* env vars, skipped when unset.",
+    "integration: tests requiring a live S3-compatible service (MinIO); configured via FREEZEBASE_TEST_S3_* env vars, skipped when unset.",
 ]
 filterwarnings = [
     # Raised inside rasterio's compiled _io.pyx read() path under NumPy 2.5;
@@ -229,7 +229,7 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 branch = true
-source = ["freezecore"]
+source = ["freezebase"]
 
 [tool.coverage.report]
 # Regression guard, not a target. The floor is intentionally below current

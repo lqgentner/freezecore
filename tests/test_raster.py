@@ -1,4 +1,4 @@
-"""Tests for freezecore.raster."""
+"""Tests for freezebase.raster."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 import rasterio
 from rasterio.transform import from_origin
 
-from freezecore.raster import (
+from freezebase.raster import (
     COG_PROFILE,
     get_epsg_string,
     get_utm_zone_string,
