@@ -1,7 +1,6 @@
 # freezecore
 
-Lightweight geospatial helpers for reproducible MGRS grids and local or
-S3-backed raster workflows.
+Lightweight geospatial helpers for reproducible MGRS grids and S3-backed raster workflows.
 
 freezecore grew out of large-scale glacier mapping, where scattered areas of
 interest require several local projections and large raster collections live
