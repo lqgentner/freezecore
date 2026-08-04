@@ -40,6 +40,20 @@ class TestTransientS3Errors:
 
 
 class TestMakeS3Upath:
+    def test_profile_forwarded_and_preserved_by_child_path(self) -> None:
+        path = make_s3_upath("s3://b", profile="research")
+        assert path.storage_options["profile"] == "research"
+        assert (path / "child.tif").storage_options["profile"] == "research"
+
+    def test_profile_can_be_combined_with_custom_endpoint(self) -> None:
+        so = make_s3_upath(
+            "s3://b/k",
+            profile="ceph-research",
+            endpoint_url="https://ceph.example.org",
+        ).storage_options
+        assert so["profile"] == "ceph-research"
+        assert so["endpoint_url"] == "https://ceph.example.org"
+
     def test_region_goes_into_client_kwargs_not_top_level(self) -> None:
         # Regression: a top-level ``region`` kwarg reaches aiobotocore's session
         # and raises; it must live in client_kwargs as ``region_name``.
@@ -87,6 +101,33 @@ class TestMakeS3Upath:
         with pytest.raises(ValueError, match="anon=True cannot be combined"):
             make_s3_upath("s3://b/k", anon=True, **creds)
 
+    def test_anon_true_with_profile_rejected(self) -> None:
+        with pytest.raises(ValueError, match="anon=True cannot be combined"):
+            make_s3_upath("s3://b/k", anon=True, profile="research")
+
+    @pytest.mark.parametrize(
+        "creds",
+        [{"key": "a"}, {"secret": "b"}, {"token": "TK"}, {"key": "a", "secret": "b"}],
+    )
+    def test_profile_with_explicit_credentials_rejected(self, creds: dict[str, str]) -> None:
+        with pytest.raises(ValueError, match=r"profile.*explicit"):
+            make_s3_upath("s3://b/k", profile="research", **creds)
+
+    @pytest.mark.parametrize("auth", [{"profile": "research"}, {"anon": True}])
+    def test_client_kwargs_credentials_rejected(self, auth: dict[str, object]) -> None:
+        # s3fs forwards these to the client, where they win; `s3_env` never sees
+        # them. Rejecting them keeps both layers signing the same way.
+        with pytest.raises(ValueError, match="client_kwargs"):
+            make_s3_upath(
+                "s3://b/k",
+                client_kwargs={"aws_access_key_id": "AK", "aws_secret_access_key": "SK"},
+                **auth,  # type: ignore[arg-type]
+            )
+
+    def test_empty_profile_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-empty"):
+            make_s3_upath("s3://b/k", profile="")
+
     def test_protocol_forced_for_bare_string(self) -> None:
         assert make_s3_upath("bucket/key.tif", key="a", secret="b").protocol == "s3"
 
@@ -104,19 +145,42 @@ class TestMakeS3Upath:
 @pytest.fixture
 def captured_session(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     """Patch ``AWSSession`` in :mod:`freezecore.s3` to record its kwargs."""
+    import inspect  # noqa: PLC0415
+
     from rasterio.session import AWSSession  # noqa: PLC0415
 
     captured: dict[str, object] = {}
 
     def spy(**kwargs: object) -> AWSSession:
         captured.update(kwargs)
-        return AWSSession(**kwargs)
+        # The returned session is unsigned so the fake profile names used by
+        # these unit tests are never resolved (the integration test covers real
+        # resolution), but the kwargs must still name real AWSSession
+        # parameters -- a renamed or misspelled one has to fail here.
+        inspect.signature(AWSSession).bind(**kwargs)
+        return AWSSession(aws_unsigned=True)
 
     monkeypatch.setattr("freezecore.s3.AWSSession", spy)
     return captured
 
 
 class TestS3Env:
+    def test_session_receives_profile(
+        self,
+        captured_session: dict[str, object],
+    ) -> None:
+        p = make_s3_upath(
+            "s3://b/k",
+            profile="research",
+            endpoint_url="https://ceph.example.org",
+        )
+        with s3_env(p):
+            pass
+        assert captured_session["profile_name"] == "research"
+        assert captured_session["aws_access_key_id"] is None
+        assert captured_session["aws_secret_access_key"] is None
+        assert captured_session["aws_unsigned"] is False
+
     def test_https_endpoint_options(self) -> None:
         p = make_s3_upath("s3://b/k", key="a", secret="b", endpoint_url="https://ceph.example.org")
         with s3_env(p):
