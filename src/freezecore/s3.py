@@ -46,6 +46,11 @@ GDAL_HTTP_RETRY_CODES = ",".join(str(code) for code in sorted({403, *TRANSIENT_H
 GDAL_HTTP_MAX_RETRY = 5
 GDAL_HTTP_RETRY_DELAY_S = 1
 
+# botocore client kwargs that carry credentials. s3fs forwards these straight to
+# the client, where they win over everything else -- but `s3_env` never sees them,
+# so they must not be mixed with a profile or a key pair.
+CLIENT_CREDENTIAL_KEYS = ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
+
 
 def _retry_transient_s3_errors(exc: Exception) -> bool:
     """s3fs custom error handler that retries transient `ClientError` responses.
@@ -66,6 +71,7 @@ def make_s3_upath(
     path: str,
     *,
     anon: bool = False,
+    profile: str | None = None,
     key: str | None = None,
     secret: str | None = None,
     token: str | None = None,
@@ -84,15 +90,23 @@ def make_s3_upath(
         protocol is forced, so a bare ``"my-bucket/key"`` also works.
     anon : bool, default False
         Whether to use an anonymous connection (public buckets only). If
-        ``False``, uses the ``key``/``secret`` given, or boto's credential
-        resolver (``client_kwargs``, environment variables, config files, EC2
-        IAM server, in that order). Mirrors ``s3fs.S3FileSystem``'s ``anon``.
+        ``False``, uses ``profile``, the ``key``/``secret`` given, or boto's
+        default credential resolver. Mirrors ``s3fs.S3FileSystem``'s ``anon``.
+    profile : str, optional
+        Named AWS configuration profile to use for this path. The profile name
+        is stored on the path and used independently by both s3fs and Rasterio.
+        May be combined with ``endpoint_url`` for S3-compatible stores, but not
+        with ``anon=True`` or explicit ``key``, ``secret``, or ``token``.
+        Setting a profile explicitly makes boto skip its environment-variable
+        credential provider on both layers, so such a path can never be signed
+        by ambient ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY`` values --
+        which is what makes profiles the safer way to authenticate here.
     key : str, optional
-        If not anonymous, use this access key ID, if specified. Takes
-        precedence over ``aws_access_key_id`` in ``client_kwargs``.
+        If not anonymous, use this access key ID, if specified. Mutually
+        exclusive with ``aws_access_key_id`` in ``client_kwargs``.
     secret : str, optional
-        If not anonymous, use this secret access key, if specified. Takes
-        precedence over ``aws_secret_access_key`` in ``client_kwargs``.
+        If not anonymous, use this secret access key, if specified. Mutually
+        exclusive with ``aws_secret_access_key`` in ``client_kwargs``.
     token : str, optional
         If not anonymous, use this security token, if specified, for
         temporary/STS credentials.
@@ -107,7 +121,10 @@ def make_s3_upath(
     client_kwargs : dict, optional
         Extra kwargs forwarded to the underlying botocore client. Defaults to
         ``{"endpoint_url": endpoint_url}``. ``region`` is injected here as
-        ``region_name``.
+        ``region_name``. Credentials passed here (:data:`CLIENT_CREDENTIAL_KEYS`)
+        reach s3fs only, never :func:`s3_env`, so they are rejected alongside
+        ``anon=True`` and ``profile`` rather than silently signing the two
+        layers differently.
 
     Returns
     -------
@@ -119,7 +136,9 @@ def make_s3_upath(
     Raises
     ------
     ValueError
-        If ``anon=True`` is combined with ``key``, ``secret``, or ``token``.
+        If ``anon=True`` is combined with a profile or credentials, if a profile
+        is combined with explicit ``key``, ``secret``, ``token``, or credentials
+        in ``client_kwargs``, or if ``profile`` is an empty string.
 
     Examples
     --------
@@ -132,9 +151,35 @@ def make_s3_upath(
     Signed access via boto's credential resolver, with no explicit key pair::
 
         path = make_s3_upath("s3://my-private-bucket/x.tif")
+
+    Per-path profile selection, including for an S3-compatible endpoint::
+
+        path = make_s3_upath(
+            "s3://my-bucket/x.tif",
+            profile="research",
+            endpoint_url="https://objects.example.org",
+        )
     """
-    if anon and (key is not None or secret is not None or token is not None):
-        msg = "anon=True cannot be combined with `key`, `secret`, or `token`."
+    if profile is not None and not profile:
+        msg = "`profile` must be a non-empty profile name, or None."
+        raise ValueError(msg)
+    explicit_credentials = (
+        key is not None
+        or secret is not None
+        or token is not None
+        or any(name in (client_kwargs or {}) for name in CLIENT_CREDENTIAL_KEYS)
+    )
+    if anon and (profile is not None or explicit_credentials):
+        msg = (
+            "anon=True cannot be combined with `profile`, `key`, `secret`, `token`, "
+            "or credentials in `client_kwargs`."
+        )
+        raise ValueError(msg)
+    if profile is not None and explicit_credentials:
+        msg = (
+            "`profile` cannot be combined with explicit `key`, `secret`, `token`, "
+            "or credentials in `client_kwargs`."
+        )
         raise ValueError(msg)
     resolved_client_kwargs = (
         client_kwargs if client_kwargs is not None else {"endpoint_url": endpoint_url}
@@ -144,6 +189,7 @@ def make_s3_upath(
     return UPath(
         path,
         protocol="s3",
+        profile=profile,
         key=key,
         secret=secret,
         token=token,
@@ -166,15 +212,17 @@ def s3_env(path: UPath) -> Generator[None]:
     options attached to ``path`` and applies them to rasterio for the duration
     of the ``with`` block. Requests are sent unsigned only when the path carries
     ``anon=True``; otherwise GDAL signs them, using ``key``/``secret`` when
-    present and falling back to boto's credential resolver when not.
+    present, selecting the path's named profile when configured, and falling
+    back to boto's default credential resolver otherwise.
 
     Parameters
     ----------
     path : UPath
         A UPath with ``protocol="s3"`` whose ``storage_options`` carry
-        fsspec/s3fs credentials (``key``, ``secret``, ``token``), an optional
-        ``anon`` flag, an optional ``client_kwargs["region_name"]``, and an
-        optional custom ``endpoint_url`` (as produced by :func:`make_s3_upath`).
+        an optional named ``profile``, fsspec/s3fs credentials (``key``,
+        ``secret``, ``token``), an optional ``anon`` flag, an optional
+        ``client_kwargs["region_name"]``, and an optional custom
+        ``endpoint_url`` (as produced by :func:`make_s3_upath`).
     """
     so = path.storage_options
     key = so.get("key")
@@ -188,6 +236,7 @@ def s3_env(path: UPath) -> Generator[None]:
         aws_secret_access_key=secret,
         aws_session_token=so.get("token"),
         region_name=(so.get("client_kwargs") or {}).get("region_name"),
+        profile_name=so.get("profile"),
     )
 
     options: dict[str, str] = {

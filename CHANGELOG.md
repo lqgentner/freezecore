@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
+## Unreleased
+
+### Added
+
+- Per-path named AWS profile support in `make_s3_upath`. Combinable with a custom
+  `endpoint_url`, mutually exclusive with `anon=True` and explicit
+  `key`/`secret`/`token`. Setting a profile takes environment credentials out of
+  boto's resolution chain, so the path signs with the profile's keys only.
+
+### Changed
+
+- `make_s3_upath` rejects credentials in `client_kwargs`, which reach s3fs but
+  not `s3_env`.
+
 ## [0.2.0] - 2026-08-03
 
 ### Added
