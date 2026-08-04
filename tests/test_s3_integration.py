@@ -43,6 +43,8 @@ _ENDPOINT = os.getenv("FREEZECORE_TEST_S3_ENDPOINT")
 _KEY = os.getenv("FREEZECORE_TEST_S3_KEY")
 _SECRET = os.getenv("FREEZECORE_TEST_S3_SECRET")
 _BUCKET = os.getenv("FREEZECORE_TEST_S3_BUCKET", "freezecore-test")
+# Name of the throwaway shared-credentials profile written by ``s3_profile_key``.
+_AWS_PROFILE = "freezecore-integration"
 
 _skip_reason = "FREEZECORE_TEST_S3_ENDPOINT/KEY/SECRET not set"
 pytestmark = [
@@ -51,7 +53,7 @@ pytestmark = [
 ]
 
 WIDTH, HEIGHT = 8, 6
-_PROFILE = {
+_RASTER_PROFILE = {
     "dtype": "float32",
     "count": 1,
     "width": WIDTH,
@@ -92,15 +94,59 @@ def s3_key2(bucket_root: UPath) -> Iterator[UPath]:
     path.unlink(missing_ok=True)
 
 
+@pytest.fixture
+def s3_profile_key(
+    bucket_root: UPath,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[UPath]:
+    """Yield an object path authenticated solely by a named AWS profile.
+
+    ``bucket_root`` (key/secret) is depended on only to create the bucket; the
+    yielded path carries no credentials of its own, so the round trip fails
+    unless both s3fs and GDAL resolve the profile.
+    """
+    credentials = tmp_path / "credentials"
+    credentials.write_text(
+        f"[{_AWS_PROFILE}]\naws_access_key_id = {_KEY}\naws_secret_access_key = {_SECRET}\n",
+    )
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+    # Isolate from a developer's ~/.aws/config, which may define a same-named
+    # profile with its own region or endpoint.
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+
+    # Same bucket, but reached through a path that carries only the profile.
+    root = make_s3_upath(
+        str(bucket_root),
+        profile=_AWS_PROFILE,
+        endpoint_url=_ENDPOINT,  # type: ignore[arg-type]
+    )
+    path = root / f"{uuid.uuid4().hex}.tif"
+    fs = path.fs
+    yield path
+    path.unlink(missing_ok=True)
+    # Drop the cached filesystem bound to the now-vanishing credentials file.
+    fs.clear_instance_cache()
+
+
 class TestWriteCogS3:
     def test_round_trip(self, s3_key: UPath) -> None:
         data = np.full((HEIGHT, WIDTH), 3.0, dtype=np.float32)
 
-        write_cog(data, s3_key, _PROFILE, band_names=["VH"])
+        write_cog(data, s3_key, _RASTER_PROFILE, band_names=["VH"])
 
         assert s3_key.exists()
         with rasterio_open(s3_key) as ds:
             assert ds.descriptions == ("VH",)
+            assert np.array_equal(ds.read(1), data)
+
+    def test_round_trip_with_named_profile(self, s3_profile_key: UPath) -> None:
+        data = np.full((HEIGHT, WIDTH), 5.0, dtype=np.float32)
+
+        write_cog(data, s3_profile_key, _RASTER_PROFILE, band_names=["VH"])
+
+        assert s3_profile_key.exists()
+        with rasterio_open(s3_profile_key) as ds:
             assert np.array_equal(ds.read(1), data)
 
 
@@ -108,7 +154,7 @@ class TestRewriteTiffS3:
     def test_local_to_s3_copy(self, tmp_path: Path, s3_key: UPath) -> None:
         src = tmp_path / "src.tif"
         data = np.full((HEIGHT, WIDTH), 1.0, dtype=np.float32)
-        write_cog(data, src, _PROFILE, band_names=["VV"])
+        write_cog(data, src, _RASTER_PROFILE, band_names=["VV"])
 
         rewrite_tiff(src, s3_key, profile=COG_PROFILE)
 
@@ -121,7 +167,7 @@ class TestRewriteTiffS3:
     def test_local_to_s3_move_deletes_source(self, tmp_path: Path, s3_key: UPath) -> None:
         src = tmp_path / "src.tif"
         data = np.full((HEIGHT, WIDTH), 2.0, dtype=np.float32)
-        write_cog(data, src, _PROFILE)
+        write_cog(data, src, _RASTER_PROFILE)
 
         rewrite_tiff(src, s3_key, profile=COG_PROFILE, move=True)
 
@@ -133,7 +179,7 @@ class TestRewriteTiffS3:
         # S3, with the source-read and destination-write each entering their own
         # credentialed env.
         data = np.full((HEIGHT, WIDTH), 4.0, dtype=np.float32)
-        write_cog(data, s3_key, _PROFILE, band_names=["VH"])
+        write_cog(data, s3_key, _RASTER_PROFILE, band_names=["VH"])
 
         rewrite_tiff(s3_key, s3_key2, profile=COG_PROFILE)
 
