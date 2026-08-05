@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 import pytest
 
 pytest.importorskip("s3fs")
@@ -15,9 +18,27 @@ from upath import UPath
 from freezebase.s3 import (
     TRANSIENT_S3_ERROR_CODES,
     _retry_transient_s3_errors,
+    aws_session,
+    clear_aws_session_cache,
     make_s3_upath,
     s3_env,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+    from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _clear_session_cache() -> Generator[None]:
+    """Keep `aws_session`'s memo from leaking between tests.
+
+    Load-bearing, not hygiene: a warm cache bypasses the `captured_session` spy
+    entirely, and would hand one test's credentials to the next.
+    """
+    clear_aws_session_cache()
+    yield
+    clear_aws_session_cache()
 
 
 def _client_error(code: str) -> ClientError:
@@ -251,3 +272,85 @@ class TestS3Env:
         with s3_env(p):
             pass
         assert captured_session["aws_unsigned"] is False
+
+
+@pytest.fixture
+def aws_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """Point the AWS SDK at an isolated credentials file holding two profiles.
+
+    These tests build *real* `AWSSession` objects rather than using the
+    `captured_session` spy, so the profiles they name have to actually resolve.
+    Isolating both AWS config paths keeps a developer's real credentials from
+    satisfying -- or interfering with -- that resolution.
+
+    Returns the two profile names, which carry different keys.
+    """
+    credentials = tmp_path / "credentials"
+    credentials.write_text(
+        "[research]\n"
+        "aws_access_key_id = AKIARESEARCH\n"
+        "aws_secret_access_key = s3cret\n"
+        "\n"
+        "[archive]\n"
+        "aws_access_key_id = AKIAARCHIVE\n"
+        "aws_secret_access_key = s3cret\n",
+    )
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    return "research", "archive"
+
+
+class TestAwsSessionCache:
+    def test_credentials_resolved_once_across_many_envs(
+        self,
+        aws_profiles: tuple[str, str],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # The regression this cache exists for: a named profile takes botocore's
+        # env-var provider out of the chain, so every uncached session used to
+        # re-read the shared credentials file -- once per raster operation.
+        profile, _ = aws_profiles
+        p = make_s3_upath("s3://b/k", profile=profile)
+        with caplog.at_level(logging.INFO, logger="botocore.credentials"):
+            for _ in range(5):
+                with s3_env(p):
+                    pass
+        resolutions = [r for r in caplog.records if "Found credentials" in r.getMessage()]
+        assert len(resolutions) == 1
+
+    def test_equivalent_paths_share_a_session(self, aws_profiles: tuple[str, str]) -> None:
+        profile, _ = aws_profiles
+        first = make_s3_upath("s3://b/k", profile=profile)
+        second = make_s3_upath("s3://other-bucket/other-key", profile=profile)
+        assert aws_session(first) is aws_session(second)
+
+    def test_child_path_shares_parent_session(self, aws_profiles: tuple[str, str]) -> None:
+        # The case that actually recurs: `raster.py` enters `s3_env` for each
+        # product path derived from one configured prefix.
+        profile, _ = aws_profiles
+        parent = make_s3_upath("s3://b/prefix", profile=profile)
+        assert aws_session(parent / "scene.tif") is aws_session(parent)
+
+    @pytest.mark.parametrize(
+        "other",
+        [
+            {"profile": "archive"},
+            {"key": "AK", "secret": "SK"},
+            {"anon": True},
+            {"profile": "research", "region": "eu-central-1"},
+        ],
+    )
+    def test_differing_configurations_get_distinct_sessions(
+        self,
+        other: dict[str, object],
+        aws_profiles: tuple[str, str],
+    ) -> None:
+        profile, _ = aws_profiles
+        base = make_s3_upath("s3://b/k", profile=profile)
+        assert aws_session(base) is not aws_session(make_s3_upath("s3://b/k", **other))  # type: ignore[arg-type]
+
+    def test_clear_cache_forces_rebuild(self) -> None:
+        p = make_s3_upath("s3://b/k", key="AK", secret="SK")
+        before = aws_session(p)
+        clear_aws_session_cache()
+        assert aws_session(p) is not before

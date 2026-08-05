@@ -14,6 +14,7 @@ from (and consulted after) botocore's `retries.max_attempts` config.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError
@@ -65,6 +66,83 @@ def _retry_transient_s3_errors(exc: Exception) -> bool:
 
 
 set_custom_error_handler(_retry_transient_s3_errors)
+
+
+@lru_cache(maxsize=32)
+def _aws_session(
+    unsigned: bool,  # noqa: FBT001
+    key: str | None,
+    secret: str | None,
+    token: str | None,
+    region_name: str | None,
+    profile: str | None,
+    /,
+) -> AWSSession:
+    """Build an `AWSSession`, memoized on the options that define its identity.
+
+    Positional-only so a caller can't split the cache by switching call form.
+    Bounded so that per-request STS credentials evict rather than accumulate.
+    """
+    return AWSSession(
+        aws_unsigned=unsigned,
+        aws_access_key_id=key,
+        aws_secret_access_key=secret,
+        aws_session_token=token,
+        region_name=region_name,
+        profile_name=profile,
+    )
+
+
+def aws_session(path: UPath) -> AWSSession:
+    """Return a cached rasterio `AWSSession` for an S3 `UPath`.
+
+    Constructing an `AWSSession` runs boto's whole credential resolution chain
+    eagerly, so paths sharing a configuration share one session: it is resolved
+    once per process instead of once per :func:`s3_env` block, which
+    :func:`freezebase.raster` enters on *every* raster operation.
+
+    Caching is safe for rotating credentials: rasterio re-freezes the session's
+    credentials on each `rasterio.Env` entry, so refreshable STS/SSO profiles
+    still pick up new keys on their own. Static credentials read from a file are
+    frozen for the process lifetime -- call :func:`clear_aws_session_cache` if
+    such a file is rewritten underneath a long-running process.
+
+    Parameters
+    ----------
+    path : UPath
+        A UPath with ``protocol="s3"`` whose ``storage_options`` carry an
+        optional named ``profile``, fsspec/s3fs credentials (``key``,
+        ``secret``, ``token``), an optional ``anon`` flag, and an optional
+        ``client_kwargs["region_name"]`` (as produced by :func:`make_s3_upath`).
+
+    Returns
+    -------
+    AWSSession
+        Unsigned if the path carries ``anon=True``; otherwise signed with the
+        path's ``key``/``secret``, its named profile, or -- absent both -- boto's
+        default credential resolver.
+    """
+    so = path.storage_options
+    return _aws_session(
+        # Read the same flag s3fs does, defaulting the same way it does, so a
+        # path cannot be signed for one layer and unsigned for the other.
+        bool(so.get("anon", False)),
+        so.get("key"),
+        so.get("secret"),
+        so.get("token"),
+        (so.get("client_kwargs") or {}).get("region_name"),
+        so.get("profile"),
+    )
+
+
+def clear_aws_session_cache() -> None:
+    """Discard every `AWSSession` memoized by :func:`aws_session`.
+
+    The next :func:`aws_session` call per configuration re-resolves credentials
+    from scratch. Needed only when static credentials change mid-process -- a
+    rewritten shared credentials file or a swapped ``AWS_*`` environment.
+    """
+    _aws_session.cache_clear()
 
 
 def make_s3_upath(
@@ -215,6 +293,9 @@ def s3_env(path: UPath) -> Generator[None]:
     present, selecting the path's named profile when configured, and falling
     back to boto's default credential resolver otherwise.
 
+    The session itself comes from :func:`aws_session`, so entering this block
+    repeatedly for the same configuration doesn't re-resolve credentials.
+
     Parameters
     ----------
     path : UPath
@@ -225,19 +306,7 @@ def s3_env(path: UPath) -> Generator[None]:
         ``endpoint_url`` (as produced by :func:`make_s3_upath`).
     """
     so = path.storage_options
-    key = so.get("key")
-    secret = so.get("secret")
-    # Read the same flag s3fs does, defaulting the same way it does, so a path
-    # cannot be signed for one layer and unsigned for the other.
-    unsigned = bool(so.get("anon", False))
-    session = AWSSession(
-        aws_unsigned=unsigned,
-        aws_access_key_id=key,
-        aws_secret_access_key=secret,
-        aws_session_token=so.get("token"),
-        region_name=(so.get("client_kwargs") or {}).get("region_name"),
-        profile_name=so.get("profile"),
-    )
+    session = aws_session(path)
 
     options: dict[str, str] = {
         # Don't probe for sidecar files on open.
