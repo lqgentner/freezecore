@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the project is pre-1.0 (`0.x`), minor releases may contain breaking changes.
 
-## Unreleased
+## [0.3.0] - 2026-08-05
 
 ### Added
 
@@ -14,6 +14,9 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   `endpoint_url`, mutually exclusive with `anon=True` and explicit
   `key`/`secret`/`token`. Setting a profile takes environment credentials out of
   boto's resolution chain, so the path signs with the profile's keys only.
+- `aws_session`, returning the cached Rasterio `AWSSession` for an S3 path, and
+  `clear_aws_session_cache` to discard those sessions. Prefer `aws_session` over
+  constructing an `AWSSession` directly, so every layer signs identically.
 
 ### Changed
 
@@ -21,6 +24,13 @@ While the project is pre-1.0 (`0.x`), minor releases may contain breaking change
   PyPI under the same name. The import path, PyPI distribution name,
   `FREEZEBASE_CACHE`/`FREEZEBASE_DATA` environment variables, and the GitHub
   repository all changed accordingly; there is no compatibility shim for the old names.
+- `s3_env` reuses a cached `AWSSession` per distinct S3 configuration instead of
+  building one per call. Constructing a session resolves boto's whole credential
+  chain eagerly, and `s3_env` is entered on every raster operation, so a
+  profile-authenticated path previously re-read the shared credentials file
+  for every raster read and write. Refreshable STS/SSO credentials still rotate, because
+  Rasterio re-freezes them on each `Env` entry; static credentials rewritten
+  mid-process now need `clear_aws_session_cache`.
 - `make_s3_upath` rejects credentials in `client_kwargs`, which reach s3fs but
   not `s3_env`.
 

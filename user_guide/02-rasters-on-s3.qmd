@@ -83,6 +83,13 @@ credential provider. A profiled path is therefore never signed by whatever
 Besides making multiple stores usable in one process, this prevents ambient
 credentials intended for one service from being sent to another.
 
+Resolving a profile means reading the AWS configuration files, so the resulting
+Rasterio session is cached per configuration and reused by every subsequent
+read and write. Refreshable credentials—STS or SSO profiles—still rotate on
+their own. Static credentials are held for the lifetime of the process; if the
+credentials file is rewritten underneath a long-running process, call
+`clear_aws_session_cache()` to force the next access to resolve it again.
+
 Explicit credentials and temporary session tokens are also supported. This is
 useful when credentials come from an application-specific secret store rather
 than an AWS configuration file:
