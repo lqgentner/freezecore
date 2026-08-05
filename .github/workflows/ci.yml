@@ -33,7 +33,7 @@ jobs:
           enable-cache: true
       - run: uv sync --all-extras
       - name: mypy
-        run: uv run mypy src/freezecore
+        run: uv run mypy src/freezebase
 
   test:
     runs-on: ubuntu-latest
@@ -49,7 +49,7 @@ jobs:
       - name: Run tests with coverage
         run: >
           uv run --python ${{ matrix.python-version }} --all-extras
-          pytest -q --cov=freezecore --cov-branch --cov-report=term-missing
+          pytest -q --cov=freezebase --cov-branch --cov-report=term-missing
 
   test-lowest:
     # Verifies the declared dependency lower bounds actually install and pass on
@@ -90,9 +90,9 @@ jobs:
           done
       - name: Run S3 integration tests
         env:
-          FREEZECORE_TEST_S3_ENDPOINT: http://localhost:9000
-          FREEZECORE_TEST_S3_KEY: testkey
-          FREEZECORE_TEST_S3_SECRET: testsecret
+          FREEZEBASE_TEST_S3_ENDPOINT: http://localhost:9000
+          FREEZEBASE_TEST_S3_KEY: testkey
+          FREEZEBASE_TEST_S3_SECRET: testsecret
         run: uv run --all-extras pytest -q -m integration
 
   build:
@@ -113,12 +113,12 @@ jobs:
         run: |
           uv venv /tmp/base
           uv pip install --python /tmp/base "$(ls dist/*.whl)"
-          uv run --python /tmp/base --no-project python -c "import freezecore; from freezecore import mgrs, raster, vrt, download, vectools; print('base import OK')"
+          uv run --python /tmp/base --no-project python -c "import freezebase; from freezebase import mgrs, raster, vrt, download, vectools; print('base import OK')"
       - name: Smoke-test [s3] wheel in a clean environment
         run: |
           uv venv /tmp/s3
           uv pip install --python /tmp/s3 "$(ls dist/*.whl)[s3]"
-          uv run --python /tmp/s3 --no-project python -c "import freezecore.s3; print('s3 import OK')"
+          uv run --python /tmp/s3 --no-project python -c "import freezebase.s3; print('s3 import OK')"
       - uses: actions/upload-artifact@v4
         with:
           name: dist

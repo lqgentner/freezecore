@@ -1,7 +1,7 @@
 # Great Docs Configuration
 # See https://posit-dev.github.io/great-docs/user-guide/configuration.html
 
-display_name: freezecore
+display_name: freezebase
 parser: numpy
 dynamic: false
 # Not published on PyPI -- it is installed straight from GitHub
@@ -9,8 +9,8 @@ pypi: false
 
 # GitHub Integration
 # ------------------
-repo: https://github.com/lqgentner/freezecore
-site_url: "https://lqgentner.github.io/freezecore/"
+repo: https://github.com/lqgentner/freezebase
+site_url: "https://lqgentner.github.io/freezebase/"
 
 source:
   enabled: true
@@ -39,9 +39,9 @@ hero:
 
 # SEO
 # ---
-# Quarto already writes correct <title>s ("freezecore" on the homepage,
-# "The MGRS grid – freezecore" elsewhere). Great Docs' post-render step then
-# appends "| {site_name}" on top, producing "freezecore | freezecore", because
+# Quarto already writes correct <title>s ("freezebase" on the homepage,
+# "The MGRS grid – freezebase" elsewhere). Great Docs' post-render step then
+# appends "| {site_name}" on top, producing "freezebase | freezebase", because
 # its "already templated?" guard tests for an ASCII " - " while Quarto joins
 # with an en dash (U+2013). Emitting just the page title suppresses the second
 # append. Revisit if great-docs > 0.16.0 fixes post-render.py:430.
@@ -66,7 +66,7 @@ nav_icons:
 reference:
   title: "API Reference"
   desc: >-
-    Every public symbol in freezecore, grouped by the module that defines it.
+    Every public symbol in freezebase, grouped by the module that defines it.
   sections:
     - title: MGRS grid
       desc: >-

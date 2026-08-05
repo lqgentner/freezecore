@@ -1,4 +1,4 @@
-"""Tests for shared helpers in freezecore.utils and freezecore.download."""
+"""Tests for shared helpers in freezebase.utils and freezebase.download."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 import requests
 
-from freezecore.download import _is_transient_request_error
-from freezecore.utils import (
+from freezebase.download import _is_transient_request_error
+from freezebase.utils import (
     file_sha256,
     format_valid_options,
     get_credentials_from_env,
@@ -94,7 +94,7 @@ class TestGetCredentialsFromEnv:
 
 class TestGetDataDir:
     def test_expands_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("FREEZECORE_DATA", "~/fcdata")
+        monkeypatch.setenv("FREEZEBASE_DATA", "~/fcdata")
         result = get_data_dir()
         assert "~" not in str(result)
         assert result.is_absolute()
@@ -102,7 +102,7 @@ class TestGetDataDir:
 
 class TestFileSha256:
     def test_matches_hashlib(self, tmp_path: Path) -> None:
-        data = b"freezecore" * 100_000  # exceeds one chunk
+        data = b"freezebase" * 100_000  # exceeds one chunk
         path = tmp_path / "blob.bin"
         path.write_bytes(data)
         assert file_sha256(path) == hashlib.sha256(data).hexdigest()

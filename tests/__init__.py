@@ -1,1 +1,1 @@
-"""Test suite for freezecore."""
+"""Test suite for freezebase."""

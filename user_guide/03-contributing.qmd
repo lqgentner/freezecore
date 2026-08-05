@@ -2,9 +2,9 @@
 title: "Contributing"
 ---
 
-freezecore is a small core library maintained on a best-effort basis. Bug reports and
+freezebase is a small core library maintained on a best-effort basis. Bug reports and
 questions belong on the
-[issue tracker](https://github.com/lqgentner/freezecore/issues).
+[issue tracker](https://github.com/lqgentner/freezebase/issues).
 
 ## Setting up
 
@@ -12,13 +12,13 @@ The project uses [uv](https://docs.astral.sh/uv/). One command creates the
 venv and installs all (development) dependencies:
 
 ```bash
-git clone https://github.com/lqgentner/freezecore.git
-cd freezecore
+git clone https://github.com/lqgentner/freezebase.git
+cd freezebase
 uv sync --all-extras
 ```
 
 `--all-extras` matters: the `s3` extra is optional at runtime but the test suite imports
-`freezecore.s3`, so a bare `uv sync` leaves those tests skipped.
+`freezebase.s3`, so a bare `uv sync` leaves those tests skipped.
 
 ## The checks
 
@@ -27,13 +27,13 @@ These are the same four commands CI runs, so a clean run locally means a clean r
 ```bash
 uv run pytest
 uv run ruff format && uv run ruff check --fix
-uv run mypy src/freezecore
+uv run mypy src/freezebase
 ```
 
 A few things worth knowing about each.
 
 **Tests.** The suite is fast (a few seconds) and offline. Tests marked `integration` need a
-live S3-compatible service and are skipped unless the `FREEZECORE_TEST_S3_*` environment
+live S3-compatible service and are skipped unless the `FREEZEBASE_TEST_S3_*` environment
 variables are set — see [S3 integration tests](#s3-integration-tests) below.
 
 **Lint.** `ruff` runs with a broad rule set and numpydoc docstring conventions, both
@@ -41,7 +41,7 @@ configured in `pyproject.toml`. Docstrings on public functions need `Parameters`
 `Returns`, and `Raises` sections; the linter enforces it.
 
 **Types.** The package ships a `py.typed` marker, so its annotations are part of the public
-contract. `mypy` must pass on `src/freezecore` before a change lands.
+contract. `mypy` must pass on `src/freezebase` before a change lands.
 
 ## S3 integration tests
 
@@ -53,13 +53,13 @@ docker run -d --name minio -p 9000:9000 \
   -e MINIO_ROOT_USER=testkey -e MINIO_ROOT_PASSWORD=testsecret \
   minio/minio server /data
 
-FREEZECORE_TEST_S3_ENDPOINT=http://localhost:9000 \
-FREEZECORE_TEST_S3_KEY=testkey \
-FREEZECORE_TEST_S3_SECRET=testsecret \
+FREEZEBASE_TEST_S3_ENDPOINT=http://localhost:9000 \
+FREEZEBASE_TEST_S3_KEY=testkey \
+FREEZEBASE_TEST_S3_SECRET=testsecret \
   uv run pytest -q -m integration
 ```
 
-Run these whenever you touch `freezecore.s3` or the S3 branches of `freezecore.raster`.
+Run these whenever you touch `freezebase.s3` or the S3 branches of `freezebase.raster`.
 The unit tests mock the object store, so they will not catch a broken credential or
 endpoint path.
 
@@ -122,7 +122,7 @@ git add _freeze/                                      # commit the new outputs
 ## Releasing
 
 Versions come from git tags via `hatch-vcs`, so there is no version string to edit. Record
-changes in [`CHANGELOG.md`](https://github.com/lqgentner/freezecore/blob/main/CHANGELOG.md)
+changes in [`CHANGELOG.md`](https://github.com/lqgentner/freezebase/blob/main/CHANGELOG.md)
 under `[Unreleased]` as you go, following
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 

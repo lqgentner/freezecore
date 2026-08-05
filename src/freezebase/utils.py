@@ -71,9 +71,8 @@ def get_cache_dir(cache_dir: str | Path | None = None) -> Path:
 
     Determines the cache directory to use based on the following priority:
     1. Provided `cache_dir` parameter
-    2. 'FREEZECORE_CACHE' environment variable
-    3. 'DEEPFREEZER_CACHE' environment variable (legacy)
-    4. System cache directory (via platformdirs)
+    2. 'FREEZEBASE_CACHE' environment variable
+    3. System cache directory (via platformdirs)
 
     Parameters
     ----------
@@ -90,19 +89,19 @@ def get_cache_dir(cache_dir: str | Path | None = None) -> Path:
     -----
     The system cache location varies by platform:
 
-    - Linux: ~/.cache/freezecore
-    - macOS: ~/Library/Caches/freezecore
-    - Windows: %LOCALAPPDATA%\\freezecore\\Cache
+    - Linux: ~/.cache/freezebase
+    - macOS: ~/Library/Caches/freezebase
+    - Windows: %LOCALAPPDATA%\\freezebase\\Cache
     """
-    cache_dir = cache_dir or os.getenv("FREEZECORE_CACHE") or os.getenv("DEEPFREEZER_CACHE")
+    cache_dir = cache_dir or os.getenv("FREEZEBASE_CACHE")
     if cache_dir:
         return Path(cache_dir).expanduser()
 
     # Fallback to system cache
-    system_cache = user_cache_dir("freezecore")
+    system_cache = user_cache_dir("freezebase")
     logger_.warning(
         "Using system cache directory: '%s' "
-        "Set 'FREEZECORE_CACHE' environment variable or pass `cache_dir` parameter "
+        "Set 'FREEZEBASE_CACHE' environment variable or pass `cache_dir` parameter "
         "to customize location.",
         system_cache,
     )
@@ -115,8 +114,7 @@ def get_data_dir(data_dir: str | Path | None = None) -> Path:
 
     Determines the data directory to use for large datasets based on:
     1. Provided `data_dir` parameter
-    2. 'FREEZECORE_DATA' environment variable
-    3. 'DEEPFREEZER_DATA' environment variable (legacy)
+    2. 'FREEZEBASE_DATA' environment variable
 
     Parameters
     ----------
@@ -135,12 +133,12 @@ def get_data_dir(data_dir: str | Path | None = None) -> Path:
         is provided.
 
     """
-    data_dir = data_dir or os.getenv("FREEZECORE_DATA") or os.getenv("DEEPFREEZER_DATA")
+    data_dir = data_dir or os.getenv("FREEZEBASE_DATA")
     if data_dir:
         return Path(data_dir).expanduser()
     msg = (
         "Data directory must be provided via 'data_dir' parameter "
-        "or 'FREEZECORE_DATA' environment variable"
+        "or 'FREEZEBASE_DATA' environment variable"
     )
     raise ValueError(msg)
 

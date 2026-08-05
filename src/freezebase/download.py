@@ -26,8 +26,8 @@ from rich.progress import (
 )
 import tenacity
 
-from freezecore.progress import create_progress
-from freezecore.utils import shorten_string
+from freezebase.progress import create_progress
+from freezebase.utils import shorten_string
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

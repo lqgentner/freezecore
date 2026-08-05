@@ -1,4 +1,4 @@
-"""Tests for freezecore.vectordata cache lifecycle."""
+"""Tests for freezebase.vectordata cache lifecycle."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import geopandas as gpd
 import pytest
 import shapely
 
-from freezecore.utils import file_sha256
-from freezecore.vectordata import (
+from freezebase.utils import file_sha256
+from freezebase.vectordata import (
     DatasetMetadata,
     GeoVectorData,
     _get_path_lock,

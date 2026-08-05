@@ -74,7 +74,7 @@ def _env_for_path(path: AnyPath) -> Generator[None]:
     """Enter the appropriate rasterio environment for a path's storage backend.
 
     Local paths get a plain ``Env``; S3 ``UPath`` instances get a credentialed
-    env via :func:`freezecore.s3.s3_env`.
+    env via :func:`freezebase.s3.s3_env`.
 
     Raises
     ------
@@ -88,7 +88,7 @@ def _env_for_path(path: AnyPath) -> Generator[None]:
                 yield
         case "s3":
             # Lazy import: keeps botocore/s3fs (the `[s3]` extra) out of the base import.
-            from freezecore.s3 import s3_env  # noqa: PLC0415
+            from freezebase.s3 import s3_env  # noqa: PLC0415
 
             with s3_env(path):
                 yield

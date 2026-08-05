@@ -28,7 +28,7 @@ jobs:
         uses: quarto-dev/quarto-actions/setup@v2
 
       # `--all-extras` is required, not optional: the "Rasters on S3" guide
-      # imports `freezecore.s3`, which lives behind the `s3` extra. The `docs`
+      # imports `freezebase.s3`, which lives behind the `s3` extra. The `docs`
       # group carries great-docs itself plus the plotting stack the guides
       # execute with.
       - name: Install dependencies

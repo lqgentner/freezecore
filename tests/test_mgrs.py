@@ -1,4 +1,4 @@
-"""Tests for freezecore.mgrs - MGRS grid system."""
+"""Tests for freezebase.mgrs - MGRS grid system."""
 
 from affine import Affine
 import numpy as np
@@ -6,7 +6,7 @@ from pyproj import CRS
 import pytest
 from shapely import Point, box
 
-from freezecore.mgrs import (
+from freezebase.mgrs import (
     MGRSGeoBox,
     MGRSGrid,
     UTMZones,
