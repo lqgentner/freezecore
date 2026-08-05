@@ -18,20 +18,14 @@ for the reasoning.
 
 Requires Python 3.12 or newer, and [uv](https://docs.astral.sh/uv/) or pip.
 
-freezebase is not published on PyPI yet — install it from GitHub:
+freezebase is on [PyPI](https://pypi.org/project/freezebase/):
 
 ```bash
 # uv
-uv add "freezebase @ git+https://github.com/lqgentner/freezebase.git"
+uv add freezebase
 
 # pip
-pip install "freezebase @ git+https://github.com/lqgentner/freezebase.git"
-```
-
-Pin a release tag for reproducible environments:
-
-```bash
-uv add "freezebase @ git+https://github.com/lqgentner/freezebase.git@v0.1.0"
+pip install freezebase
 ```
 
 S3 support is optional; see [Raster and S3 helpers](#raster-and-s3-helpers)
@@ -84,7 +78,7 @@ rewrite_tiff("in.tif", "out.tif", profile=COG_PROFILE, move=True)  # move
 S3 support needs the optional `s3fs`, `fsspec`, and `boto3` dependencies:
 
 ```bash
-uv add "freezebase[s3] @ git+https://github.com/lqgentner/freezebase.git"
+uv add "freezebase[s3]"
 ```
 
 Credentials and endpoint configuration travel with each path. Named profiles

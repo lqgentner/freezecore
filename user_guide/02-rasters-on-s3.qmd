@@ -49,7 +49,7 @@ configuration. The wrapper deliberately supports local and S3 paths; other
 The S3 integration requires s3fs, fsspec, and boto3:
 
 ```bash
-pip install "freezebase[s3] @ git+https://github.com/lqgentner/freezebase.git"
+pip install "freezebase[s3]"
 ```
 
 These dependencies are imported lazily, so local raster operations work with
