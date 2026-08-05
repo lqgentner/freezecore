@@ -4,8 +4,6 @@
 display_name: freezebase
 parser: numpy
 dynamic: false
-# Not published on PyPI -- it is installed straight from GitHub
-pypi: false
 
 # GitHub Integration
 # ------------------
@@ -25,6 +23,7 @@ authors:
     role: Author
     email: luis.gentner@geo.uzh.ch
     github: lqgentner
+    orcid: 0009-0006-4453-0881
 
 # Logo & Favicon
 # --------------
